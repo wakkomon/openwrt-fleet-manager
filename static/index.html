@@ -1,0 +1,909 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenWRT Fleet Manager</title>
+<style>
+:root { --bg:#10151c; --card:#1a222c; --line:#2a3644; --tx:#dce6f0; --dim:#8fa2b5;
+        --acc:#4da3ff; --ok:#3ddc84; --warn:#ffb020; --err:#ff5d5d; }
+* { box-sizing:border-box }
+body { margin:0; font:14px/1.45 system-ui,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--tx) }
+header { display:flex; align-items:center; gap:14px; padding:14px 20px; background:var(--card);
+         border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; flex-wrap:wrap }
+header h1 { font-size:17px; margin:0; font-weight:600 }
+header .sub { color:var(--dim); font-size:12px }
+.wrap { padding:18px 20px; max-width:1250px; margin:0 auto }
+.btn { background:var(--acc); color:#08131e; border:0; border-radius:6px; padding:7px 13px;
+       cursor:pointer; font-weight:600; font-size:13px }
+.btn.ghost { background:transparent; color:var(--acc); border:1px solid var(--acc) }
+.btn.small { padding:4px 9px; font-size:12px }
+.btn.ok { background:var(--ok) } .btn.warn { background:var(--warn) }
+.btn.danger { background:var(--err); color:#160b0b }
+.btn:disabled { opacity:.45; cursor:not-allowed }
+.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px;
+        margin-bottom:16px }
+.grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px }
+.grid4 { display:grid; grid-template-columns:repeat(4,1fr); gap:12px }
+@media (max-width:900px){ .grid2,.grid4{grid-template-columns:1fr} }
+h2 { font-size:14px; margin:0 0 10px; color:var(--dim); text-transform:uppercase; letter-spacing:.5px }
+input,select,textarea { background:#0d1219; border:1px solid var(--line); color:var(--tx);
+       border-radius:6px; padding:7px 9px; font-size:13px; width:100% }
+textarea { font-family:ui-monospace,monospace }
+label { display:block; font-size:12px; color:var(--dim); margin:9px 0 3px }
+table { width:100%; border-collapse:collapse; font-size:13px }
+th,td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line) }
+th { color:var(--dim); font-weight:500; font-size:12px }
+th.sortable { cursor:pointer; user-select:none }
+th.sortable:hover { color:var(--acc) }
+th .arrow { font-size:10px }
+.dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:7px;
+       background:var(--dim); vertical-align:1px }
+.dot.on { background:var(--ok) } .dot.off { background:var(--err) }
+.pill { display:inline-block; border-radius:9px; padding:2px 9px; font-size:12px }
+.pill.upd { background:rgba(255,176,32,.15); color:var(--warn) }
+.pill.cur { background:rgba(61,220,132,.15); color:var(--ok) }
+.pill.err { background:rgba(255,93,93,.15); color:var(--err) }
+.pill.info { background:rgba(77,163,255,.15); color:var(--acc) }
+.mono { font-family:ui-monospace,monospace; font-size:12px }
+.row { display:flex; gap:8px; flex-wrap:wrap; align-items:center }
+.log { background:#0b0f15; border:1px solid var(--line); border-radius:6px; padding:10px;
+       font:12px ui-monospace,monospace; white-space:pre-wrap; max-height:220px; overflow:auto;
+       color:var(--dim) }
+.rowline { display:flex; justify-content:space-between; padding:5px 0; border-bottom:1px dashed var(--line) }
+.hint { font-size:12px; color:var(--dim) }
+.tabbar { display:flex; gap:6px; margin-bottom:16px; flex-wrap:wrap }
+.tabbar .btn.active { background:var(--tx); }
+.badge { background:#0d1219; border:1px solid var(--line); border-radius:9px; padding:2px 9px;
+         font-size:12px; color:var(--dim) }
+.stat { background:#0d1219; border:1px solid var(--line); border-radius:10px; padding:14px 16px }
+.stat .n { font-size:26px; font-weight:700 } .stat .l { font-size:12px; color:var(--dim) }
+canvas.chart { width:100%; height:220px; background:#0d1219; border:1px solid var(--line); border-radius:8px }
+.piebox { display:flex; gap:18px; align-items:center; flex-wrap:wrap }
+.piebox canvas { flex:0 0 auto }
+.pielegend { flex:1; min-width:160px; font-size:13px }
+.pielegend div { display:flex; align-items:center; gap:8px; padding:3px 0 }
+.pielegend .sw { width:11px; height:11px; border-radius:3px; flex:0 0 auto }
+.pielegend .n { margin-left:auto; font-weight:600 }
+</style>
+</head>
+<body>
+<header>
+  <h1>📡 OpenWRT Fleet Manager</h1>
+  <div class="sub"><span id="health"></span></div>
+  <div style="margin-left:auto" class="row">
+    <span class="badge" id="whoami"></span>
+    <button class="btn ghost small" onclick="logout()">Abmelden</button>
+    <button class="btn ghost small" onclick="refreshAll()">↻ Aktualisieren</button>
+    <button class="btn small" onclick="showAddDevice()">+ Router</button>
+    <button class="btn small ghost" id="bulkBtn" onclick="showBulk()">+ Bulk</button>
+  </div>
+</header>
+<div class="wrap">
+  <div class="tabbar">
+    <button class="btn ghost small active" data-tab="dashboard" onclick="showTab('dashboard')">Dashboard</button>
+    <button class="btn ghost small" data-tab="router" onclick="showTab('router')">Router</button>
+    <button class="btn ghost small" data-tab="clients" onclick="showTab('clients')">Client-Suche</button>
+    <button class="btn ghost small" data-tab="users" id="usersTab" onclick="showTab('users')" style="display:none">Benutzer</button>
+  </div>
+
+  <!-- ================= DASHBOARD ================= -->
+  <div id="tab-dashboard">
+    <div class="grid4" style="margin-bottom:16px">
+      <div class="stat"><div class="n" id="stRouters">–</div><div class="l">Router gesamt</div></div>
+      <div class="stat"><div class="n" id="stOnline">–</div><div class="l">Online</div></div>
+      <div class="stat"><div class="n" id="stWlan">–</div><div class="l">WLAN-Clients</div></div>
+      <div class="stat"><div class="n" id="stLan">–</div><div class="l">LAN-Geräte</div></div>
+    </div>
+    <div class="grid2">
+      <div class="card">
+        <h2>WLAN-Netze (SSIDs)</h2>
+        <table><thead><tr><th>Router</th><th>SSID</th><th>Kanal</th><th>Band</th></tr></thead>
+        <tbody id="dashSsids"></tbody></table>
+      </div>
+      <div class="card">
+        <h2>Belegte Kanäle</h2>
+        <table><thead><tr><th>Band</th><th>Kanal</th><th>SSID</th><th>Router</th></tr></thead>
+        <tbody id="dashChannels"></tbody></table>
+      </div>
+    </div>
+    <div class="grid2">
+      <div class="card">
+        <h2>Nutzung Clients pro WLAN-Kanal</h2>
+        <div class="piebox"><canvas id="pieChannel" width="260" height="200"></canvas>
+        <div class="pielegend" id="legChannel"></div></div>
+      </div>
+      <div class="card">
+        <h2>Nutzung Clients pro AP</h2>
+        <div class="piebox"><canvas id="pieAp" width="260" height="200"></canvas>
+        <div class="pielegend" id="legAp"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= ROUTER ================= -->
+  <div id="tab-router" style="display:none">
+    <div class="card">
+      <h2>Routers</h2>
+      <table id="devTable">
+        <thead><tr>
+          <th class="sortable" onclick="setSort('status')">Status <span class="arrow" id="ar-status"></span></th>
+          <th class="sortable" onclick="setSort('name')">Name / IP <span class="arrow" id="ar-name"></span></th>
+          <th>Modell / Board</th>
+          <th class="sortable" onclick="setSort('version')">OpenWrt <span class="arrow" id="ar-version"></span></th>
+          <th class="sortable" onclick="setSort('uptime')">Uptime <span class="arrow" id="ar-uptime"></span></th>
+          <th class="sortable" onclick="setSort('load')">Auslastung (↓/↑) <span class="arrow" id="ar-load"></span></th>
+          <th>Firmware</th>
+          <th class="sortable" onclick="setSort('clients')">Endgeräte <span class="arrow" id="ar-clients"></span></th>
+          <th style="width:300px">Aktionen</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="hint" style="margin-top:10px">Automatisiert: Status alle 60 s · Endgeräte-Scan alle 5 min ·
+      Firmware-Prüfung täglich 07:00. Der Router-Name wird automatisch aus dem Hostnamen aktualisiert
+      (manuelle Umbenennungen gewinnen).</p>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <h2>Zentrale Konfiguration (uci)</h2>
+        <label>Router auswählen</label>
+        <select id="cDev" multiple size="5"></select>
+        <div id="cRows" class="row" style="margin:10px 0 4px"></div>
+        <button class="btn small ghost" onclick="addCRow()">+ Wert</button>
+        <div class="row" style="margin-top:12px">
+          <label style="margin:0;display:flex;align-items:center;gap:6px"><input type="checkbox" id="cCommit" checked style="width:auto"> uci commit</label>
+          <label style="margin:0;display:flex;align-items:center;gap:6px"><input type="checkbox" id="cBackup" checked style="width:auto"> vorher Backup</label>
+        </div>
+        <button class="btn" style="margin-top:12px" onclick="applyCentral()">Auf gewählte Router anwenden</button>
+        <div id="cResult" style="margin-top:10px"></div>
+      </div>
+      <div class="card">
+        <h2>Aktivität (Jobs)</h2>
+        <div id="jobs" class="log"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= CLIENT SEARCH ================= -->
+  <div id="tab-clients" style="display:none">
+    <div class="card">
+      <h2>Client-Suche (Hostname / MAC / IP)</h2>
+      <div class="row">
+        <input id="q" placeholder="z. B. wohnzimmer-tv oder 3c:1a:25" style="max-width:380px"
+               onkeydown="if(event.key==='Enter')doSearch()">
+        <button class="btn" onclick="doSearch()">Suchen</button>
+        <span class="hint" id="sInfo"></span>
+      </div>
+      <table style="margin-top:12px"><thead><tr><th>Router</th><th>Typ</th><th>IP</th><th>MAC</th>
+        <th>Hostname</th><th>Signal</th></tr></thead>
+      <tbody id="sBody"></tbody></table>
+    </div>
+
+    <div class="card">
+      <h2>Alle Clients <span class="badge" id="aCN"></span></h2>
+      <div class="hint" style="margin-bottom:8px">
+        Alle erfassten Clients aller Router – WLAN mit SSID, Kanal und Signalstärke.
+        Aktualisiert automatisch nach jedem Scan; <b>↻ aktualisieren</b> lädt die letzten Daten neu.
+      </div>
+      <div class="row" style="margin-bottom:8px">
+        <button class="btn small ghost" onclick="loadAllClients()">↻ aktualisieren</button>
+        <input id="aFilter" placeholder="Filter: Router / MAC / Hostname / SSID"
+               style="max-width:340px" oninput="renderAllClients()">
+      </div>
+      <table><thead><tr><th>Router</th><th>Typ</th><th>MAC</th><th>Hostname</th>
+        <th>WLAN (SSID)</th><th>Kanal</th><th>Signal</th></tr></thead>
+      <tbody id="aBody"></tbody></table>
+    </div>
+  </div>
+
+  <!-- ================= USERS ================= -->
+  <div id="tab-users" style="display:none">
+    <div class="card">
+      <h2>Benutzerverwaltung</h2>
+      <table><thead><tr><th>Benutzer</th><th>Anzeigename</th><th>Rolle</th><th>Erstellt</th>
+        <th>Aktionen</th></tr></thead><tbody id="uBody"></tbody></table>
+      <div class="grid2" style="margin-top:14px">
+        <div>
+          <h2>Neuen Benutzer anlegen</h2>
+          <label>Benutzername</label><input id="nuName">
+          <label>Anzeigename</label><input id="nuDisp">
+          <label>Passwort (min. 8 Zeichen)</label><input id="nuPw" type="password">
+          <label>Rolle</label><select id="nuRole"><option value="user">Benutzer</option><option value="admin">Administrator</option></select>
+          <button class="btn" style="margin-top:10px" onclick="addUser()">Anlegen</button>
+        </div>
+        <div>
+          <h2>Passwort ändern (eigenes)</h2>
+          <label>Altes Passwort</label><input id="pwOld" type="password">
+          <label>Neues Passwort</label><input id="pwNew" type="password">
+          <button class="btn" style="margin-top:10px" onclick="changePw()">Ändern</button>
+          <div id="pwMsg" class="hint" style="margin-top:8px"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- device detail overlay -->
+<div id="dModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10"
+     onclick="if(event.target===this)closeDev()">
+  <div class="card" style="max-width:980px;margin:4vh auto;max-height:92vh;overflow:auto">
+    <div class="row" style="justify-content:space-between">
+      <h2 id="dTitle" style="margin:0"></h2>
+      <button class="btn ghost small" onclick="closeDev()">✕</button>
+    </div>
+    <div id="dInfo" class="row" style="margin:10px 0 14px"></div>
+    <div class="row" style="margin-bottom:14px">
+      <button class="btn small" onclick="devSurvey(currentDev)">↻ Jetzt scannen</button>
+      <button class="btn small ghost" onclick="devRename(currentDev)">✎ Umbenennen</button>
+      <button class="btn small danger" onclick="devReboot(currentDev)">⟳ Router neu starten</button>
+      <span class="hint" id="dActMsg"></span>
+    </div>
+
+    <div class="card" style="margin:0 0 14px">
+      <h2>Historie – Netzwerklast (Bit/s)</h2>
+      <div class="row" style="margin-bottom:6px">
+        <select id="hHours" style="max-width:150px" onchange="loadHistory(currentDev)">
+          <option value="6">6 Stunden</option><option value="24" selected>24 Stunden</option>
+          <option value="72">3 Tage</option><option value="168">7 Tage</option>
+        </select>
+      </div>
+      <canvas class="chart" id="chartTraffic" height="220"></canvas>
+      <h2 style="margin-top:12px">WLAN-Nutzung (Clients)</h2>
+      <canvas class="chart" id="chartClients" height="160"></canvas>
+    </div>
+
+    <div class="grid2">
+      <div>
+        <h2>LAN-Geräte <span class="badge" id="dLanN"></span></h2>
+        <table><thead><tr><th>IP</th><th>MAC</th><th>Name</th><th>IF</th></tr></thead>
+        <tbody id="dLan"></tbody></table>
+      </div>
+      <div>
+        <h2>WLAN-Stationen <span class="badge" id="dWlanN"></span></h2>
+        <table><thead><tr><th>IP</th><th>MAC</th><th>Name</th><th>Signal</th></tr></thead>
+        <tbody id="dWlan"></tbody></table>
+      </div>
+    </div>
+
+    <div class="grid2" style="margin-top:14px">
+      <div>
+        <h2>Firmware</h2>
+        <div class="row">
+          <button class="btn small" onclick="fwCheck(currentDev)">Prüfen</button>
+          <span id="dFw" class="hint"></span>
+        </div>
+        <div id="dFwDetail" class="hint mono" style="margin-top:8px"></div>
+        <div class="row" style="margin-top:10px">
+          <label style="margin:0;display:flex;align-items:center;gap:6px"><input type="checkbox" id="dPreserve" checked style="width:auto"> Konfiguration behalten (-c)</label>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn warn" onclick="fwUpgrade(currentDev,false)">⚠ Image-Test (sysupgrade -T)</button>
+          <button class="btn ok" onclick="fwUpgrade(currentDev,true)">Firmware-Update durchführen</button>
+        </div>
+        <div id="dFwLog" style="margin-top:10px" class="log" hidden></div>
+      </div>
+      <div>
+        <h2>Konfiguration</h2>
+        <div class="row">
+          <button class="btn small" onclick="cfgBackup(currentDev)">Sicherung anlegen</button>
+          <button class="btn small ghost" onclick="loadBackups(currentDev)">Liste</button>
+        </div>
+        <div id="dBackups" style="margin-top:10px"></div>
+        <div style="margin-top:10px">
+          <label>Alte Sicherung wiederherstellen</label>
+          <div class="row">
+            <select id="dRestoreSel" style="flex:1"></select>
+            <button class="btn small" onclick="cfgRestore(currentDev)">Wiederherstellen</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- add device modal -->
+<div id="aModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10"
+     onclick="if(event.target===this)hideAddDevice()">
+  <div class="card" style="max-width:460px;margin:8vh auto">
+    <h2>Neuen Router hinzufügen</h2>
+    <label>Name</label><input id="aName" placeholder="z. B. Archer C7 (WG)">
+    <label>IP / Host</label><input id="aIp" placeholder="192.168.1.94">
+    <div class="grid2">
+      <div><label>SSH-Port</label><input id="aPort" value="22"></div>
+      <div><label>SSH-User</label><input id="aUser" value="root"></div>
+    </div>
+    <label>SSH-Passwort</label><input id="aPass" type="password" placeholder="OpenWRT-Root-Passwort">
+    <label>Firmware-Quelle</label><input id="aFwDir" value="https://downloads.openwrt.org/releases">
+    <div class="row" style="margin-top:16px;justify-content:flex-end">
+      <button class="btn ghost" onclick="hideAddDevice()">Abbrechen</button>
+      <button class="btn" onclick="addDevice()">Speichern</button>
+    </div>
+  </div>
+</div>
+
+<!-- bulk add modal -->
+<div id="bModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10"
+     onclick="if(event.target===this)hideBulk()">
+  <div class="card" style="max-width:560px;margin:7vh auto">
+    <h2>Router bulk hinzufügen</h2>
+    <div class="grid2">
+      <div><label>IP-Bereich / Prefix</label><input id="bPrefix" placeholder="192.168.1."></div>
+      <div><label>Von / Bis (letzte Ziffer)</label>
+        <div class="row"><input id="bFrom" value="1" style="flex:1"><input id="bTo" value="254" style="flex:1"></div></div>
+    </div>
+    <div class="grid2">
+      <div><label>Name-Präfix</label><input id="bNamePfx" placeholder="Router-"></div>
+      <div><label>SSH-Port / User</label>
+        <div class="row"><input id="bPort" value="22" style="flex:1"><input id="bUser" value="root" style="flex:1"></div></div>
+    </div>
+    <label>SSH-Passwort (einheitlich)</label><input id="bPass" type="password">
+    <label>oder eigene Liste (Name;IP pro Zeile — wird ergänzt)</label>
+    <textarea id="bList" rows="4" placeholder="Flur;192.168.1.2&#10;DG;192.168.1.53"></textarea>
+    <div class="hint" style="margin-top:6px" id="bPreview">–</div>
+    <div class="row" style="margin-top:14px;justify-content:flex-end">
+      <button class="btn ghost" onclick="hideBulk()">Abbrechen</button>
+      <button class="btn" onclick="bulkAdd()">Hinzufügen</button>
+    </div>
+    <div id="bResult" style="margin-top:10px" class="hint"></div>
+  </div>
+</div>
+
+<script>
+const $=s=>document.querySelector(s);
+let currentDev=null, devices=[], cRows=[[]], me=null;
+let sortKey='name', sortDir=1;
+
+async function api(path,opts={}){
+  const r=await fetch(path,opts);
+  if(r.status===401||r.status===403&&path==='/api/whoami'){ location.replace('/login'); return null; }
+  if(!r.ok){ let m; try{m=(await r.json()).detail}catch(e){m=r.status}
+    alert('Fehler: '+(typeof m==='string'?m:JSON.stringify(m))); return null; }
+  return r.json();
+}
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+/* ---------- helpers ---------- */
+function fmtUptime(s){
+  if(s==null||s==='') return '—';
+  s=Math.floor(Number(s)||0);
+  const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60);
+  if(d) return d+' d '+h+' h';
+  if(h) return h+' h '+m+' min';
+  return m+' min';
+}
+function fmtBps(v){
+  v=Number(v)||0;
+  if(v>=1e9) return (v/1e9).toFixed(1)+' Gbit/s';
+  if(v>=1e6) return (v/1e6).toFixed(1)+' Mbit/s';
+  if(v>=1e3) return (v/1e3).toFixed(0)+' kbit/s';
+  return v+' bit/s';
+}
+function fmtTime(t){ return t? String(t).replace('T',' ').slice(0,16): '—'; }
+
+/* ---------- tabs ---------- */
+function showTab(name){
+  ['dashboard','router','clients','users'].forEach(t=>{
+    $('#tab-'+t).style.display = (t===name)?'':'none';
+  });
+  document.querySelectorAll('.tabbar .btn').forEach(b=>
+    b.classList.toggle('active', b.dataset.tab===name));
+  if(name==='dashboard') loadDashboard();
+  if(name==='clients') loadAllClients();
+  if(name==='users') loadUsers();
+}
+
+/* ---------- auth / me ---------- */
+async function loadMe(){
+  me=await api('/api/whoami');
+  if(!me) return;
+  $('#whoami').textContent=(me.display_name||me.username)+' ('+(me.role==='admin'?'Admin':'Benutzer')+')';
+  const admin=me.role==='admin';
+  $('#usersTab').style.display=admin?'':'none';
+  $('#bulkBtn').style.display=admin?'':'none';
+  document.querySelectorAll('[data-admin]').forEach(el=>el.style.display=admin?'':'none');
+}
+async function logout(){ await api('/api/logout',{method:'POST'}); location.replace('/login'); }
+
+/* ---------- device list ---------- */
+async function refreshAll(){
+  devices=await api('/api/devices')||[];
+  renderDevices(); renderCentralSelect(); refreshJobs();
+  $('#health').textContent=devices.filter(d=>d.status&&d.status[0]===1).length+' von '
+    +devices.length+' Router online';
+  if(currentDev) renderDevInfoBar(currentDev);
+  if($('#tab-dashboard') && $('#tab-dashboard').style.display!=='none') loadDashboard();
+  if($('#tab-clients') && $('#tab-clients').style.display!=='none') loadAllClients();
+}
+function sortVal(d,key){
+  const info=d.info||{};
+  if(key==='status') return (d.status&&d.status[0]===1)?1:0;
+  if(key==='name') return (d.name||'').toLowerCase();
+  if(key==='version') return info.version||'';
+  if(key==='uptime') return info.uptime_s||0;
+  if(key==='load') return (info.rx_bps||0)+(info.tx_bps||0);
+  if(key==='clients') return (d.clients?.lan||0)+(d.clients?.wlan||0);
+  return 0;
+}
+function setSort(key){
+  if(sortKey===key) sortDir=-sortDir; else { sortKey=key; sortDir=1; }
+  renderDevices();
+}
+function renderDevices(){
+  document.querySelectorAll('th .arrow').forEach(a=>a.textContent='');
+  const ar=$('#ar-'+sortKey); if(ar) ar.textContent=sortDir>0?'▲':'▼';
+  const rows=[...devices].sort((a,b)=>{
+    const x=sortVal(a,sortKey), y=sortVal(b,sortKey);
+    return (x<y?-1:x>y?1:0)*sortDir;
+  });
+  $('#devTable tbody').innerHTML=rows.map(d=>{
+    const st=d.status; const on=st&&st[0]===1; const info=d.info||{};
+    return `<tr>
+      <td><span class="dot ${on?'on':'off'}"></span>${fmtTime(st&&st[1])}</td>
+      <td><b>${esc(d.name)}</b><br><span class="hint mono">${esc(d.ip)}</span></td>
+      <td>${esc(info.model||'')} <span class="hint mono">${esc(info.target||'')}</span></td>
+      <td class="mono">${esc(info.version||'—')}</td>
+      <td>${fmtUptime(info.uptime_s)}</td>
+      <td class="mono">${info.rx_bps!=null?esc(fmtBps(info.rx_bps))+' / '+esc(fmtBps(info.tx_bps)):'—'}</td>
+      <td>${fwPill(d)}</td>
+      <td>${d.clients.lan} LAN · ${d.clients.wlan} WLAN</td>
+      <td class="row">
+        <button class="btn small ghost" onclick="openDev(${d.id})">Details</button>
+        <button class="btn small ghost" onclick="checkStatus(${d.id})">Status</button>
+        <button class="btn small danger" onclick="devReboot(${d.id},true)">⟳</button>
+        <button class="btn small warn" onclick="if(confirm('Router entfernen?'))delDev(${d.id})">Löschen</button>
+      </td></tr>`;
+  }).join('')||'<tr><td colspan="9" class="hint">Keine Router – „+ Router“ oben rechts.</td></tr>';
+}
+function fwPill(d){
+  const f=d.firmware;
+  if(!f) return '<span class="pill cur">—</span>';
+  if(f.has_update) return `<span class="pill upd">Update: ${esc(f.latest_version)}</span>`;
+  return `<span class="pill cur">aktuell ${esc(f.latest_version||f.current_version)}</span>`;
+}
+async function checkStatus(id){ await api(`/api/devices/${id}/status`,{method:'POST'}); refreshAll(); }
+async function delDev(id){ await api(`/api/devices/${id}`,{method:'DELETE'}); refreshAll(); }
+
+/* ---------- add device / bulk ---------- */
+function showAddDevice(){$('#aModal').style.display='block';}
+function hideAddDevice(){$('#aModal').style.display='none';}
+async function addDevice(){
+  const body={name:$('#aName').value.trim(),ip:$('#aIp').value.trim(),
+    port:parseInt($('#aPort').value)||22,user:$('#aUser').value.trim()||'root',
+    password:$('#aPass').value,firmware_dir:$('#aFwDir').value.trim()};
+  if(!body.name||!body.ip){alert('Name und IP erforderlich');return;}
+  await api('/api/devices',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body)});
+  hideAddDevice(); refreshAll();
+}
+function showBulk(){$('#bModal').style.display='block'; updateBulkPreview();}
+function hideBulk(){$('#bModal').style.display='none'; $('#bResult').textContent='';}
+function bulkEntries(){
+  const out=[]; const seen=new Set();
+  const pfx=$('#bPrefix').value.trim(), from=parseInt($('#bFrom').value), to=parseInt($('#bTo').value);
+  const npfx=$('#bNamePfx').value.trim()||'Router-';
+  const port=parseInt($('#bPort').value)||22, user=$('#bUser').value.trim()||'root',
+        pass=$('#bPass').value;
+  if(pfx&&Number.isFinite(from)&&Number.isFinite(to)&&to>=from&&(to-from)<300){
+    for(let i=from;i<=to;i++){
+      const ip=pfx+i;
+      if(!seen.has(ip)){ seen.add(ip); out.push({name:npfx+i,ip,port,user,password:pass,
+        firmware_dir:'https://downloads.openwrt.org/releases'}); }
+    }
+  }
+  $('#bList').value.split(/\r?\n/).forEach(line=>{
+    const [name,ip]=line.split(';').map(s=>(s||'').trim());
+    if(!ip||seen.has(ip))return; seen.add(ip);
+    out.push({name:name||ip,ip,port,user,password:pass,
+      firmware_dir:'https://downloads.openwrt.org/releases'});
+  });
+  return out;
+}
+function updateBulkPreview(){ $('#bPreview').textContent=bulkEntries().length+' Router vorgesehen.'; }
+['bPrefix','bFrom','bTo','bList'].forEach(id=>{
+  document.addEventListener('input',e=>{ if(e.target.id===id) updateBulkPreview(); });
+});
+async function bulkAdd(){
+  const devicesList=bulkEntries();
+  if(!devicesList.length){alert('Keine Einträge – Prefix/Bereich oder Liste ausfüllen.');return;}
+  if(!confirm(devicesList.length+' Router hinzufügen?'))return;
+  const r=await api('/api/devices/bulk',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({devices:devicesList})});
+  if(!r)return;
+  $('#bResult').innerHTML='Hinzugefügt: '+r.added.length+
+    (r.errors.length? ' · Fehler: '+r.errors.map(e=>esc(e.ip)+' ('+esc(e.error)+')').join(', ') : '');
+  refreshAll();
+}
+
+/* ---------- detail modal ---------- */
+let detailOpen=false, pendingRefresh=null;
+async function openDev(id){
+  currentDev=id; detailOpen=true;
+  const d=devices.find(x=>x.id===id)||{name:'#'+id};
+  $('#dTitle').textContent='Details: '+d.name;
+  $('#dActMsg').textContent='';
+  $('#dModal').style.display='block';
+  renderDevInfoBar(id);
+  // once per open: refresh info+clients from the router, then re-render (no re-open)
+  clearTimeout(pendingRefresh);
+  pendingRefresh=setTimeout(async()=>{
+    if(!detailOpen||currentDev!==id)return;
+    await api(`/api/devices/${id}/info`,{method:'POST'});
+    await api(`/api/devices/${id}/clients`,{method:'POST'});
+    if(!detailOpen||currentDev!==id)return;
+    await refreshAll();
+    renderClients(id); renderFw(id); loadHistory(id);
+  },50);
+  renderClients(id); renderFw(id); loadBackups(id); loadHistory(id);
+}
+function closeDev(){ $('#dModal').style.display='none'; currentDev=null; detailOpen=false;
+  clearTimeout(pendingRefresh); }
+function renderDevInfoBar(id){
+  const d=devices.find(x=>x.id===id)||{}; const info=d.info||{};
+  $('#dTitle').textContent='Details: '+(d.name||('#'+id));
+  $('#dInfo').innerHTML=[
+    ['IP',info.ip||d.ip],['Modell/Board',info.model||''],['OpenWrt',info.version||''],
+    ['Ziel',info.target||''],['Arch',info.arch||''],['Uptime',fmtUptime(info.uptime_s)],
+    ['Last ↓/↑',(info.rx_bps!=null?fmtBps(info.rx_bps)+' / '+fmtBps(info.tx_bps):'')],
+    ['Stand',fmtTime(info.refreshed_at)]]
+    .filter(([,v])=>v).map(([k,v])=>`<span class="badge">${esc(k)}: <b>${esc(v)}</b></span>`).join(' ');
+}
+async function devSurvey(id){
+  $('#dActMsg').textContent='Scan läuft …';
+  const r=await api(`/api/devices/${id}/survey`,{method:'POST'});
+  $('#dActMsg').textContent=r?('Scan fertig um '+new Date().toLocaleTimeString('de-DE')+' · '
+    +((r.clients||[]).length)+' WLAN, '+Object.keys(r.leases||{}).length+' Lease'):'Scan fehlgeschlagen';
+  await refreshAll();
+  renderClients(id); renderFw(id); loadHistory(id); renderDevInfoBar(id);
+}
+async function devReboot(id,fromList){
+  if(!confirm('Router wirklich neu starten? Er ist kurz nicht erreichbar.'))return;
+  const r=await api(`/api/devices/${id}/reboot`,{method:'POST'});
+  if(r){ (fromList?alert('Reboot befohlen.'):$('#dActMsg').textContent='Reboot befohlen – warte …');
+    let tries=0;
+    const t=setInterval(async()=>{
+      tries++;
+      await refreshAll();
+      const d=devices.find(x=>x.id===id);
+      if(d&&d.status&&d.status[0]===1||tries>24){ clearInterval(t);
+        if(!fromList&&$('#dActMsg')) $('#dActMsg').textContent=
+          (d&&d.status&&d.status[0]===1)?'Router ist wieder online ✓':'Router immer noch offline ✗'; }
+    },10000);
+  }
+}
+async function devRename(id){
+  const d=devices.find(x=>x.id===id); if(!d)return;
+  const name=prompt('Neuer Anzeigename (manuell – verhindert Auto-Umbenennung):',d.name);
+  if(name==null)return;
+  await api(`/api/devices/${id}/rename?name=${encodeURIComponent(name)}`,{method:'POST'});
+  refreshAll(); if(detailOpen&&currentDev)renderDevInfoBar(currentDev);
+}
+async function renderClients(id){
+  api(`/api/devices/${id}/clients?kind=lan`).then(l=>{
+    if(currentDev!==id)return;
+    $('#dLan').innerHTML=(l||[]).map(c=>`<tr><td class="mono">${esc(c.ip)}</td><td class="mono">${esc(c.mac)}</td><td>${esc(c.hostname)}</td><td class="mono">${esc(c.iface)}</td></tr>`).join('')||'<tr><td colspan="4" class="hint">keine Einträge (ARP leer?)</td></tr>';
+    $('#dLanN').textContent=(l||[]).length;
+  });
+  api(`/api/devices/${id}/clients?kind=wlan`).then(w=>{
+    if(currentDev!==id)return;
+    $('#dWlan').innerHTML=(w||[]).map(c=>`<tr><td class="mono">${esc(c.ip)}</td><td class="mono">${esc(c.mac)}</td><td>${esc(c.hostname)}</td><td class="mono">${esc(c.signal||'')}</td></tr>`).join('')||'<tr><td colspan="4" class="hint">keine assoziierten Stationen</td></tr>';
+    $('#dWlanN').textContent=(w||[]).length;
+  });
+}
+
+/* ---------- history charts ---------- */
+function drawChart(canvasId, snaps, series, yfmt){
+  const cv=$(canvasId); const dpr=window.devicePixelRatio||1;
+  const W=cv.clientWidth||800, H=cv.clientHeight||200;
+  cv.width=W*dpr; cv.height=H*dpr;
+  const g=cv.getContext('2d'); g.scale(dpr,dpr);
+  g.clearRect(0,0,W,H);
+  if(!snaps||snaps.length<2){ g.fillStyle='#8fa2b5'; g.font='12px system-ui';
+    g.fillText('Noch keine historischen Daten – der Scheduler sammelt alle 5 Minuten.',12,H/2); return; }
+  const padL=56,padR=8,padT=8,padB=20;
+  let max=0,min=Infinity;
+  series.forEach(s=>snaps.forEach(p=>{ const v=p[s.key]||0; if(v>max)max=v; if(v<min)min=v; }));
+  if(!isFinite(min))min=0; if(max===min)max=min+1;
+  const t0=Date.parse(snaps[0].ts.replace(' ','T')+'Z'), t1=Date.parse(snaps[snaps.length-1].ts.replace(' ','T')+'Z')||t0+1;
+  const X=ts=>padL+(Date.parse(String(ts).replace(' ','T')+'Z')-t0)/(t1-t0||1)*(W-padL-padR);
+  const Y=v=>H-padB-((v-min)/(max-min))*(H-padT-padB);
+  g.strokeStyle='#2a3644'; g.fillStyle='#8fa2b5'; g.font='10px system-ui'; g.lineWidth=1;
+  for(let i=0;i<=4;i++){
+    const v=min+(max-min)*i/4, y=Y(v);
+    g.beginPath(); g.moveTo(padL,y); g.lineTo(W-padR,y); g.stroke();
+    g.fillText(yfmt(v),4,y+3);
+  }
+  series.forEach(s=>{
+    g.strokeStyle=s.color; g.lineWidth=1.6; g.beginPath();
+    snaps.forEach((p,i)=>{ const x=X(p.ts), y=Y(p[s.key]||0);
+      i?g.lineTo(x,y):g.moveTo(x,y); });
+    g.stroke();
+  });
+  g.fillStyle='#8fa2b5';
+  g.fillText(fmtTime(snaps[0].ts),padL,H-6);
+  g.fillText(fmtTime(snaps[snaps.length-1].ts),W-padR-100,H-6);
+  let lx=padL+4;
+  series.forEach(s=>{ g.fillStyle=s.color; g.fillText(s.label,lx,padT+10); lx+=g.measureText(s.label).width+14; });
+}
+async function loadHistory(id){
+  if(!id)return;
+  const hours=$('#hHours')?$('#hHours').value:24;
+  const snaps=await api(`/api/history/${id}?hours=${hours}`)||[];
+  if(currentDev!==id)return;
+  drawChart('#chartTraffic',snaps,[{key:'rx_bps',label:'↓ Empfang',color:'#4da3ff'},
+    {key:'tx_bps',label:'↑ Senden',color:'#3ddc84'}],v=>fmtBps(v));
+  drawChart('#chartClients',snaps,[{key:'wifi_clients',label:'WLAN',color:'#ffb020'},
+    {key:'lan_clients',label:'LAN',color:'#8fa2b5'}],v=>String(Math.round(v)));
+}
+
+/* ---------- firmware (unchanged behaviour) ---------- */
+function renderFw(id){
+  const d=devices.find(x=>x.id===id); const f=d&&d.firmware;
+  if(!f){$('#dFw').textContent='';$('#dFwDetail').textContent='';return;}
+  $('#dFw').innerHTML=f.has_update
+    ? `Installiert <b>${esc(f.current_version)}</b> → verfügbar <b>${esc(f.latest_version)}</b>`
+    : `Installiert <b>${esc(f.current_version)}</b> (aktuell)`;
+  $('#dFwDetail').textContent=f.url?('Image: '+f.url):'';
+}
+async function fwCheck(id){
+  const r=await api(`/api/devices/${id}/firmware/check`,{method:'POST'});
+  if(r){ await refreshAll(); renderFw(id); }
+}
+async function fwUpgrade(id,test){
+  const d=devices.find(x=>x.id===id);
+  if(test){
+    if(!confirm('Nur Image-Test (sysupgrade -T, kein Flash)?')) return;
+  } else {
+    if(!confirm('ROUTER WIRD NEU GESTARTET und die Firmware geflasht! Sicher, dass die Konfiguration erhalten bleiben soll?')) return;
+  }
+  const r=await api(`/api/devices/${id}/firmware/upgrade?test_only=${test}&preserve_config=${$('#dPreserve').checked}`,
+    {method:'POST'});
+  const log=$('#dFwLog'); log.hidden=false; log.textContent='Upgrade-Job gestartet …\n';
+  const t=setInterval(async()=>{
+    const j=(await api('/api/jobs?limit=3'))||[];
+    const mine=j.find(x=>x.device_id===id&&(x.kind==='firmware-upgrade'||x.kind==='firmware'));
+    if(mine){ log.textContent=mine.message+'\n'; }
+    if(test){ log.textContent+='Image-Test beendet (siehe sysupgrade-Log auf Router).'; clearInterval(t); }
+  },2000);
+  if(!test){
+    const w=await api(`/api/devices/${id}/firmware/wait?timeout_s=240`,{method:'POST'});
+    clearInterval(t);
+    log.textContent+='Router '+(w&&w.online?'wieder erreichbar ✓':'nach 240 s nicht erreichbar ✗')+' (Wartezeit '+(w&&w.waited_s)+' s)';
+    refreshAll();
+  }
+}
+
+/* ---------- backups (unchanged) ---------- */
+async function cfgBackup(id){
+  const r=await api(`/api/devices/${id}/config/backup`,{method:'POST'});
+  if(r){ alert('Sicherung: '+r.filename+' ('+(r.size/1024).toFixed(1)+' kB)'); loadBackups(id); }
+}
+async function loadBackups(id){
+  const list=await api(`/api/devices/${id}/config/backups`);
+  $('#dRestoreSel').innerHTML=(list||[]).map(b=>`<option value="${b.id}">${esc(b.filename)} (${(b.size/1024).toFixed(1)} kB, ${esc(b.created_at)})</option>`).join('');
+  $('#dBackups').innerHTML='<div class="hint">'+(list||[]).length+' Sicherungen gespeichert.</div>'
+  +(list||[]).slice(0,3).map(b=>`<div class="rowline"><span class="mono">${esc(b.filename)}</span>
+    <a class="mono" href="/api/config/backups/${b.id}/download" style="color:var(--acc)">⬇ laden</a></div>`).join('');
+}
+async function cfgRestore(id){
+  const sel=$('#dRestoreSel'); if(!sel.value){alert('Keine Sicherung ausgewählt');return;}
+  const bid=sel.value;
+  if(!confirm('Konfiguration aus dieser Sicherung wiederherstellen? Der laufende Zustand geht verloren.')) return;
+  const file=await fetch(`/api/config/backups/${bid}/download`);
+  const blob=await file.blob();
+  const fd=new FormData(); fd.append('file',blob,'restore.tar.gz'); fd.append('restart','false');
+  const r=await fetch(`/api/devices/${id}/config/restore`,{method:'POST',body:fd});
+  if(r.ok) alert('Wiederhergestellt ✓'); else alert('Fehler: '+await r.text());
+}
+
+/* ---------- central config (unchanged) ---------- */
+function renderCentralSelect(){
+  $('#cDev').innerHTML=devices.map(d=>`<option value="${d.id}">${esc(d.name)} (${esc(d.ip)})</option>`).join('');
+  buildCRows();
+}
+function buildCRows(){
+  $('#cRows').innerHTML='';
+  cRows.forEach((r,i)=>{
+    const div=document.createElement('div'); div.className='row';
+    div.innerHTML=`<input class="ck" style="flex:2" placeholder="wireless.radio0.ht" value="${esc(r[0])}">
+      <input class="cv" style="flex:2" placeholder="HT" value="${esc(r[1])}">
+      <button class="btn small ghost" onclick="rmCRow(${i})">✕</button>`;
+    $('#cRows').appendChild(div);
+  });
+}
+function addCRow(){ cRows.push(['','']); buildCRows(); }
+function rmCRow(i){ cRows.splice(i,1); if(!cRows.length)cRows=[[]]; buildCRows(); }
+async function applyCentral(){
+  const ids=[...$('#cDev').selectedOptions].map(o=>+o.value);
+  const assign=[...document.querySelectorAll('#cRows .ck')].map((el,i)=>({
+    key:el.value.trim(), value:document.querySelectorAll('#cRows .cv')[i].value
+  })).filter(a=>a.key);
+  if(!ids.length){alert('Mindestens einen Router auswählen');return;}
+  if(!assign.length){alert('Mindestens einen uci-Wert (z. B. wireless.radio0.ht / HT) angeben');return;}
+  const r=await api('/api/central/apply',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({device_ids:ids,assignments:assign,
+      commit:$('#cCommit').checked,backup_before:$('#cBackup').checked})});
+  $('#cResult').innerHTML='<table><thead><tr><th>Router</th><th>Ergebnis</th></tr></thead><tbody>'
+    +(r?r.results.map(x=>`<tr><td>${esc(x.name||('#'+x.device))}</td>
+      <td>${x.ok?`<span class="pill cur">angegeben ✓</span> <span class="mono hint">${esc((x.applied||[]).join(', '))}</span>`
+                :`<span class="pill err">${esc(x.error||'?')}</span>`}</td></tr>`).join(''):'')
+    +'</tbody></table>';
+}
+
+/* ---------- dashboard ---------- */
+async function loadDashboard(){
+  const d=await api('/api/dashboard'); if(!d)return;
+  $('#stRouters').textContent=d.totals.routers;
+  $('#stOnline').textContent=d.totals.online;
+  $('#stWlan').textContent=d.totals.clients_wlan;
+  $('#stLan').textContent=d.totals.clients_lan;
+  $('#dashSsids').innerHTML=(d.ssids||[]).map(s=>`<tr><td>${esc(s.router)}</td>
+    <td><b>${esc(s.ssid||'(verborgen)')}</b></td><td>${esc(s.channel??'')}</td>
+    <td>${esc(s.band||'')}</td></tr>`).join('')
+    ||'<tr><td colspan="4" class="hint">Noch keine SSIDs gecacht – erst Scannen ausgelöst vom Scheduler oder „Jetzt scannen“.</td></tr>';
+  $('#dashChannels').innerHTML=(d.channels||[]).map(c=>`<tr><td>${esc(c.band||'')}</td>
+    <td><span class="pill info">Kanal ${esc(c.channel??'')}</span></td>
+    <td>${esc(c.ssid||'')}</td><td>${esc(c.router)}</td></tr>`).join('')
+    ||'<tr><td colspan="4" class="hint">keine Daten</td></tr>';
+  renderPies(d);
+}
+
+/* ---------- dashboard pie charts ---------- */
+const PIE_COLORS=['#4da3ff','#3ddc84','#ffb020','#ff5d5d','#b57bff','#4de1ff','#ff8fd0','#8bd450'];
+function pieKey(c){ return (c.band==='2.4'?'2,4':(c.band==='6'?'6':'5'))+' GHz · Kanal '+(c.channel??'?'); }
+function drawPie(cvId, legId, items){
+  const cv=$(cvId); if(!cv) return;
+  const ctx=cv.getContext('2d');
+  const dpr=window.devicePixelRatio||1;
+  const w=cv.width/dpr, h=cv.height/dpr;   // CSS-Pixel (Canvas wurde mit DPR skaliert)
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+  const total=items.reduce((s,i)=>s+i.v,0);
+  const leg=$(legId);
+  if(!total){
+    ctx.strokeStyle='#2a3644'; ctx.setLineDash([4,4]);
+    ctx.beginPath(); ctx.arc(w/2,h/2,Math.min(w,h)/2-8,0,Math.PI*2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle='#8fa2b5'; ctx.font='13px system-ui'; ctx.textAlign='center';
+    ctx.fillText('keine Daten',w/2,h/2+4);
+    if(leg) leg.innerHTML='<div class="hint">Noch keine Clients erfasst – erst „Jetzt scannen“ oder warte auf den Scan (alle 5 min).</div>';
+    return;
+  }
+  const cx=w/2, cy=h/2, r=Math.min(w,h)/2-8;
+  let a=-Math.PI/2;
+  items.forEach((it,i)=>{
+    const slice=it.v/total*Math.PI*2;
+    ctx.beginPath(); ctx.moveTo(cx,cy);
+    ctx.arc(cx,cy,r,a,a+slice); ctx.closePath();
+    ctx.fillStyle=PIE_COLORS[i%PIE_COLORS.length]; ctx.fill();
+    a+=slice;
+  });
+  if(leg){
+    leg.innerHTML=items.map((it,i)=>
+      `<div><span class="sw" style="background:${PIE_COLORS[i%PIE_COLORS.length]}"></span>`+
+      `<span>${esc(it.label)}</span><span class="n">${it.v} ${Math.round(it.v/total*100)}%</span></div>`
+    ).join('');
+  }
+}
+function renderPies(d){
+  // 1) Clients pro WLAN-Kanal: im Backend pro (Band, Kanal) aggregiert (d.channel_usage)
+  const chanSrc=(d.channel_usage&&d.channel_usage.length)?d.channel_usage:(d.channels||[]);
+  const byChan={};
+  chanSrc.forEach(c=>{
+    const k=(c.band||'?')+'|'+(c.channel??'?');
+    (byChan[k]||(byChan[k]={label:pieKey(c),v:0})).v+=(c.clients||0);
+  });
+  const chanItems=Object.values(byChan).sort((x,y)=>y.v-x.v||x.label.localeCompare(y.label));
+  // 2) Clients pro AP: pro Router
+  const byAp={};
+  (d.routers||[]).forEach(r=>{
+    (byAp[r.name]||(byAp[r.name]={label:r.name,v:0})).v+=(r.clients_wlan||0);
+  });
+  const apItems=Object.values(byAp).sort((x,y)=>y.v-x.v||x.label.localeCompare(y.label));
+  const dpr=window.devicePixelRatio||1;
+  ['pieChannel','pieAp'].forEach(id=>{ const cv=$(id); if(cv){ cv.width=260*dpr; cv.height=200*dpr; cv.style.width='260px'; cv.style.height='200px'; } });
+  drawPie('pieChannel','legChannel',chanItems);
+  drawPie('pieAp','legAp',apItems);
+}
+
+/* ---------- client search ---------- */
+async function doSearch(){
+  const q=$('#q').value.trim();
+  if(!q){alert('Suchbegriff eingeben (Hostname, MAC oder IP)');return;}
+  $('#sInfo').textContent='suche …';
+  const r=await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+  if(r.status===401){location.replace('/login');return;}
+  const hits=await r.json();
+  $('#sInfo').textContent=(hits||[]).length+' Treffer';
+  $('#sBody').innerHTML=(hits||[]).map(c=>`<tr>
+    <td>${esc(c.device_name)} <span class="hint mono">${esc(c.device_ip)}</span></td>
+    <td>${esc(c.kind)}</td><td class="mono">${esc(c.ip)}</td>
+    <td class="mono">${esc(c.mac)}</td><td><b>${esc(c.hostname)}</b></td>
+    <td class="mono">${esc(c.signal||'')}</td></tr>`).join('')
+    ||'<tr><td colspan="6" class="hint">Keine Treffer. (Nur gecachte Clients – ggf. erst „Jetzt scannen“.)</td></tr>';
+}
+
+/* ---------- all clients (full list) ---------- */
+let allClients=[];
+async function loadAllClients(){
+  const r=await fetch('/api/clients');
+  if(r.status===401){location.replace('/login');return;}
+  allClients=await r.json();
+  renderAllClients();
+}
+function renderAllClients(){
+  const f=(($('#aFilter')||{}).value||'').toLowerCase().trim();
+  const rows=allClients.filter(c=>{
+    if(!f) return true;
+    return [c.device,c.dev_ip,c.kind,c.mac,c.hostname,c.ssid,c.channel].join(' ').toLowerCase().includes(f);
+  });
+  $('#aCN').textContent=allClients.length+' Clients';
+  $('#aBody').innerHTML=rows.map(c=>`<tr>
+    <td>${esc(c.device)} <span class="hint mono">${esc(c.dev_ip)}</span></td>
+    <td>${c.kind==='wlan'?'WLAN':'LAN'}</td>
+    <td class="mono">${esc(c.mac)}</td><td><b>${esc(c.hostname||'—')}</b></td>
+    <td>${esc(c.ssid||'—')}</td><td class="mono">${esc(c.channel||'—')}</td>
+    <td class="mono">${esc(c.signal||'')}</td></tr>`).join('')
+    ||'<tr><td colspan="7" class="hint">Noch keine Clients erfasst – bitte einen Router scannen.</td></tr>';
+}
+
+/* ---------- users ---------- */
+async function loadUsers(){
+  if(!me||me.role!=='admin')return;
+  const us=await api('/api/users')||[];
+  $('#uBody').innerHTML=us.map(u=>`<tr>
+    <td><b>${esc(u.username)}</b></td><td>${esc(u.display_name)}</td>
+    <td><span class="pill ${u.role==='admin'?'upd':'info'}">${u.role==='admin'?'Administrator':'Benutzer'}</span></td>
+    <td class="hint">${fmtTime(u.created_at)}</td>
+    <td class="row">
+      <button class="btn small ghost" onclick="editUser(${u.id},${JSON.stringify(u.username).replace(/"/g,'&quot;')})">Bearbeiten</button>
+      <button class="btn small ghost" onclick="tokenUser(${u.id})">API-Token</button>
+      <button class="btn small danger" onclick="delUser(${u.id},'${esc(u.username)}')">Löschen</button>
+    </td></tr>`).join('');
+}
+async function addUser(){
+  const r=await api('/api/users',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({username:$('#nuName').value.trim(),display_name:$('#nuDisp').value.trim(),
+      password:$('#nuPw').value,role:$('#nuRole').value})});
+  if(r){ $('#nuName').value=$('#nuPw').value=''; loadUsers(); }
+}
+async function editUser(id,username){
+  const body={};
+  const role=prompt('Neue Rolle (admin/user, leer = gleich):','');
+  if(role!==null&&role!=='') body.role=role.trim();
+  const pw=prompt('Neues Passwort (leer = gleich):','');
+  if(pw) body.password=pw;
+  if(!Object.keys(body).length)return;
+  await api(`/api/users/${id}`,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body)});
+  loadUsers();
+}
+async function tokenUser(id){
+  const r=await api(`/api/users/${id}/token`,{method:'POST'});
+  if(r) alert('API-Token (einmalig anzeigen!):\n'+r.token);
+}
+async function delUser(id,name){
+  if(!confirm('Benutzer '+name+' löschen?'))return;
+  await api(`/api/users/${id}`,{method:'DELETE'}); loadUsers();
+}
+async function changePw(){
+  const r=await api('/api/password',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({old:$('#pwOld').value,new:$('#pwNew').value})});
+  if(r){ $('#pwMsg').textContent='Passwort geändert ✓'; $('#pwOld').value=$('#pwNew').value=''; }
+}
+
+async function refreshJobs(){
+  const j=await api('/api/jobs?limit=40');
+  $('#jobs').innerHTML=(j||[]).map(x=>
+    `<div class="rowline"><span class="mono">${esc(x.created_at)}</span>
+     <span>${esc(x.kind)} · ${esc(x.message).slice(0,90)}</span></div>`).join('')||'<div class="hint">noch keine</div>';
+}
+
+loadMe();
+showTab('dashboard');
+refreshAll();
+setInterval(refreshAll,30000);
+window.addEventListener('resize',()=>{ if(detailOpen&&currentDev) loadHistory(currentDev); });
+</script>
+</body>
+</html>

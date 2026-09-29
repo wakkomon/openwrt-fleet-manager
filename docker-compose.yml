@@ -1,0 +1,18 @@
+services:
+  openwrt-fleet-manager:
+    build: .
+    image: openwrtfleet:latest
+    container_name: openwrtfleet
+    restart: unless-stopped
+    ports:
+      - "8789:8789"
+    environment:
+      # Erster Start: Standard-Admin wird nur einmal angelegt.
+      # Ohne OWF_ADMIN_PASSWORD wird ein zufälliges Passwort generiert
+      # und per `docker logs openwrtfleet` ausgegeben.
+      OWF_ADMIN_USER: admin
+      OWF_ADMIN_PASSWORD: ${OWF_ADMIN_PASSWORD:-}
+      OPENWRT_FLEET_DB: /data/openwrtfleet.db
+      OPENWRT_FLEET_BACKUPS: /data/backups
+    volumes:
+      - ./data:/data
