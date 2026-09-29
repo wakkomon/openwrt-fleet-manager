@@ -65,6 +65,13 @@ canvas.chart { width:100%; height:220px; background:#0d1219; border:1px solid va
 .pielegend div { display:flex; align-items:center; gap:8px; padding:3px 0 }
 .pielegend .sw { width:11px; height:11px; border-radius:3px; flex:0 0 auto }
 .pielegend .n { margin-left:auto; font-weight:600 }
+.groupro { cursor:pointer }
+.groupro:hover td { background:#111a26 }
+.caret { display:inline-block; transition:transform .15s; color:var(--dim); width:14px }
+.groupro.open .caret { transform:rotate(90deg) }
+tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8px 14px }
+.apitem { display:inline-block; background:#0d1219; border:1px solid var(--line); border-radius:7px;
+          padding:2px 9px; margin:3px 6px 3px 0; font-size:12px }
 </style>
 </head>
 <body>
@@ -97,18 +104,6 @@ canvas.chart { width:100%; height:220px; background:#0d1219; border:1px solid va
     </div>
     <div class="grid2">
       <div class="card">
-        <h2>WLAN-Netze (SSIDs)</h2>
-        <table><thead><tr><th>Router</th><th>SSID</th><th>Kanal</th><th>Band</th></tr></thead>
-        <tbody id="dashSsids"></tbody></table>
-      </div>
-      <div class="card">
-        <h2>Belegte Kanäle</h2>
-        <table><thead><tr><th>Band</th><th>Kanal</th><th>SSID</th><th>Router</th></tr></thead>
-        <tbody id="dashChannels"></tbody></table>
-      </div>
-    </div>
-    <div class="grid2">
-      <div class="card">
         <h2>Nutzung Clients pro WLAN-Kanal</h2>
         <div class="piebox"><canvas id="pieChannel" width="260" height="200"></canvas>
         <div class="pielegend" id="legChannel"></div></div>
@@ -117,6 +112,26 @@ canvas.chart { width:100%; height:220px; background:#0d1219; border:1px solid va
         <h2>Nutzung Clients pro AP</h2>
         <div class="piebox"><canvas id="pieAp" width="260" height="200"></canvas>
         <div class="pielegend" id="legAp"></div></div>
+      </div>
+    </div>
+    <div class="grid2">
+      <div class="card">
+        <h2>WLAN-Netze (SSIDs)</h2>
+        <table><thead><tr>
+          <th class="sortable" onclick="setDashSort('ssids','ssid')">SSID <span class="arrow" id="ar-ds-ssid"></span></th>
+          <th class="sortable" onclick="setDashSort('ssids','clients')">Clients <span class="arrow" id="ar-ds-clients"></span></th>
+          <th>Access-Points (aufklappen)</th>
+        </tr></thead>
+        <tbody id="dashSsids"></tbody></table>
+      </div>
+      <div class="card">
+        <h2>Belegte Kanäle</h2>
+        <table><thead><tr>
+          <th class="sortable" onclick="setDashSort('channels','channel')">Kanal <span class="arrow" id="ar-dc-channel"></span></th>
+          <th class="sortable" onclick="setDashSort('channels','clients')">Clients <span class="arrow" id="ar-dc-clients"></span></th>
+          <th>Netze / Router (aufklappen)</th>
+        </tr></thead>
+        <tbody id="dashChannels"></tbody></table>
       </div>
     </div>
   </div>
@@ -731,20 +746,103 @@ async function applyCentral(){
 }
 
 /* ---------- dashboard ---------- */
+const dashState={ ssids:{key:null,dir:1}, channels:{key:null,dir:1} };
+function setDashSort(tbl,key){
+  const s=dashState[tbl];
+  if(s.key===key) s.dir=-s.dir; else { s.key=key; s.dir=1; }
+  renderDashTables();
+}
+function dashArrow(id){ return document.getElementById(id); }
+function bandLabel(b){ return b==='2.4'?'2,4':(b||''); }
+function chSortKey(c){ return (c.band==='2.4'?0:c.band==='6'?2:1)*1000 + (parseInt(c.channel,10)||0); }
+function renderDashTables(){
+  // Arrows: erst alle klären, dann aktiven setzen
+  ['ar-ds-ssid','ar-ds-clients','ar-dc-channel','ar-dc-clients'].forEach(id=>{
+    const a=dashArrow(id); if(a) a.textContent='';
+  });
+  ['ssids','channels'].forEach(t=>{
+    const ar=dashArrow('ar-d'+t.slice(0,2)+'-'+dashState[t].key); if(ar) ar.textContent=dashState[t].dir>0?'▲':'▼';
+  });
+  renderSsidsTable();
+  renderChannelsTable();
+}
+function renderSsidsTable(){
+  const g={};
+  (window._dashData.ssids||[]).forEach(s=>{
+    const k=s.ssid||'(verborgen)';
+    const e=g[k]||(g[k]={ssid:k,clients:0,aps:[]});
+    e.clients+=s.clients||0;
+    e.aps.push(s);
+  });
+  let rows=Object.values(g);
+  const s0=dashState.ssids;
+  rows.sort((a,b)=>{
+    let cmp;
+    if(s0.key==='clients') cmp=a.clients-b.clients;
+    else cmp=(a.ssid||'').localeCompare(b.ssid||'')||a.clients-b.clients;
+    return cmp*s0.dir;
+  });
+  document.getElementById('dashSsids').innerHTML=rows.map((x,i)=>{
+    const n=x.aps.length;
+    return `<tr class="groupro" data-ds="${i}"><td><span class="caret">▶</span><b>${esc(x.ssid)}</b></td>
+      <td><b>${x.clients}</b></td>
+      <td class="hint">${n} AP${n===1?'':'s'}</td></tr>
+    <tr class="detail" id="dsdet${i}" style="display:none"><td colspan="3">${
+      x.aps.map(a=>`<span class="apitem">${esc(a.router)} · ${bandLabel(a.band)} GHz · Kanal ${esc(a.channel??'–')} · ${a.clients||0} Clients</span>`).join('')
+    }</td></tr>`;
+  }).join('')||'<tr><td colspan="3" class="hint">Noch keine SSIDs gecacht – erst Scannen ausgelöst vom Scheduler oder „Jetzt scannen“.</td></tr>';
+  document.querySelectorAll('#dashSsids .groupro').forEach(tr=>{
+    tr.onclick=()=>{
+      const det=document.getElementById('dsdet'+tr.dataset.ds);
+      const open=det.style.display!=='none';
+      det.style.display=open?'none':'';
+      tr.classList.toggle('open',!open);
+    };
+  });
+}
+function renderChannelsTable(){
+  const g={};
+  (window._dashData.channels||[]).forEach(c=>{
+    const k=bandLabel(c.band)+'|'+(c.channel??'?');
+    const e=g[k]||(g[k]={band:c.band,channel:c.channel,clients:0,items:[]});
+    e.clients+=c.clients||0;
+    e.items.push(c);
+  });
+  let rows=Object.values(g);
+  const s1=dashState.channels;
+  rows.sort((a,b)=>{
+    let cmp;
+    if(s1.key==='clients') cmp=a.clients-b.clients;
+    else cmp=chSortKey(a)-chSortKey(b)||a.clients-b.clients;
+    return cmp*s1.dir;
+  });
+  document.getElementById('dashChannels').innerHTML=rows.map((x,i)=>{
+    const n=x.items.length;
+    return `<tr class="groupro" data-dc="${i}"><td><span class="caret">▶</span>
+      <span class="pill info">${bandLabel(x.band)} GHz · Kanal ${esc(x.channel??'')}</span></td>
+      <td><b>${x.clients}</b></td>
+      <td class="hint">${n} Netz${n===1?'':'e'}</td></tr>
+    <tr class="detail" id="dcdet${i}" style="display:none"><td colspan="3">${
+      x.items.map(c=>`<span class="apitem">${esc(c.ssid||'(verborgen)')} · ${esc(c.router)} · ${c.clients||0} Clients</span>`).join('')
+    }</td></tr>`;
+  }).join('')||'<tr><td colspan="3" class="hint">keine Daten</td></tr>';
+  document.querySelectorAll('#dashChannels .groupro').forEach(tr=>{
+    tr.onclick=()=>{
+      const det=document.getElementById('dcdet'+tr.dataset.dc);
+      const open=det.style.display!=='none';
+      det.style.display=open?'none':'';
+      tr.classList.toggle('open',!open);
+    };
+  });
+}
 async function loadDashboard(){
   const d=await api('/api/dashboard'); if(!d)return;
+  window._dashData=d;
   $('#stRouters').textContent=d.totals.routers;
   $('#stOnline').textContent=d.totals.online;
   $('#stWlan').textContent=d.totals.clients_wlan;
   $('#stLan').textContent=d.totals.clients_lan;
-  $('#dashSsids').innerHTML=(d.ssids||[]).map(s=>`<tr><td>${esc(s.router)}</td>
-    <td><b>${esc(s.ssid||'(verborgen)')}</b></td><td>${esc(s.channel??'')}</td>
-    <td>${esc(s.band||'')}</td></tr>`).join('')
-    ||'<tr><td colspan="4" class="hint">Noch keine SSIDs gecacht – erst Scannen ausgelöst vom Scheduler oder „Jetzt scannen“.</td></tr>';
-  $('#dashChannels').innerHTML=(d.channels||[]).map(c=>`<tr><td>${esc(c.band||'')}</td>
-    <td><span class="pill info">Kanal ${esc(c.channel??'')}</span></td>
-    <td>${esc(c.ssid||'')}</td><td>${esc(c.router)}</td></tr>`).join('')
-    ||'<tr><td colspan="4" class="hint">keine Daten</td></tr>';
+  renderDashTables();
   renderPies(d);
 }
 
@@ -752,14 +850,14 @@ async function loadDashboard(){
 const PIE_COLORS=['#4da3ff','#3ddc84','#ffb020','#ff5d5d','#b57bff','#4de1ff','#ff8fd0','#8bd450'];
 function pieKey(c){ return (c.band==='2.4'?'2,4':(c.band==='6'?'6':'5'))+' GHz · Kanal '+(c.channel??'?'); }
 function drawPie(cvId, legId, items){
-  const cv=$(cvId); if(!cv) return;
+  const cv=document.getElementById(cvId); if(!cv) return;
   const ctx=cv.getContext('2d');
   const dpr=window.devicePixelRatio||1;
   const w=cv.width/dpr, h=cv.height/dpr;   // CSS-Pixel (Canvas wurde mit DPR skaliert)
   ctx.setTransform(dpr,0,0,dpr,0,0);
   ctx.clearRect(0,0,w,h);
   const total=items.reduce((s,i)=>s+i.v,0);
-  const leg=$(legId);
+  const leg=document.getElementById(legId);
   if(!total){
     ctx.strokeStyle='#2a3644'; ctx.setLineDash([4,4]);
     ctx.beginPath(); ctx.arc(w/2,h/2,Math.min(w,h)/2-8,0,Math.PI*2); ctx.stroke();
@@ -801,7 +899,7 @@ function renderPies(d){
   });
   const apItems=Object.values(byAp).sort((x,y)=>y.v-x.v||x.label.localeCompare(y.label));
   const dpr=window.devicePixelRatio||1;
-  ['pieChannel','pieAp'].forEach(id=>{ const cv=$(id); if(cv){ cv.width=260*dpr; cv.height=200*dpr; cv.style.width='260px'; cv.style.height='200px'; } });
+  ['pieChannel','pieAp'].forEach(id=>{ const cv=document.getElementById(id); if(cv){ cv.width=260*dpr; cv.height=200*dpr; cv.style.width='260px'; cv.style.height='200px'; } });
   drawPie('pieChannel','legChannel',chanItems);
   drawPie('pieAp','legAp',apItems);
 }
