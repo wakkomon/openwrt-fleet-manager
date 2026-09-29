@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+# Laufzeit-Daten (DB, Backups, Session-Secret, Credentials der Geräte)
+data/
+*.db
+*.db-journal
+*.sqlite
+.session_secret
+*.pem
+*.key
+# Lokale Host-/Passwort-Dateien
+hostpass.txt
+*.env
+.env.*
+# Docker
+docker-compose.override.yml
