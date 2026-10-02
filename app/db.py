@@ -35,6 +35,9 @@ def init_db() -> None:
                 user TEXT NOT NULL DEFAULT 'root',
                 password TEXT NOT NULL DEFAULT '',
                 firmware_dir TEXT NOT NULL DEFAULT '',
+                auth_mode TEXT NOT NULL DEFAULT 'password',
+                ssh_key TEXT,
+                auto_update INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
@@ -126,6 +129,19 @@ def init_db() -> None:
                 user_id INTEGER NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS update_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id INTEGER NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'queued',
+                source TEXT NOT NULL DEFAULT 'auto',
+                target_version TEXT NOT NULL DEFAULT '',
+                message TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                started_at TEXT,
+                finished_at TEXT
+            );
             """
         )
         # migration: signal column for WLAN clients (older DBs)
@@ -134,6 +150,15 @@ def init_db() -> None:
             conn.commit()
         except sqlite3.OperationalError:
             pass
+        # migration: SSH-Key-Login + Auto-Update columns (older DBs)
+        for _col, _ddl in (("auth_mode", "TEXT NOT NULL DEFAULT 'password'"),
+                           ("ssh_key", "TEXT"),
+                           ("auto_update", "INTEGER NOT NULL DEFAULT 0")):
+            try:
+                conn.execute("ALTER TABLE devices ADD COLUMN %s %s" % (_col, _ddl))
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
         conn.commit()
 
 
@@ -146,12 +171,14 @@ def get_db() -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 
 def add_device(name: str, ip: str, port: int, user: str, password: str,
-               firmware_dir: str) -> int:
+               firmware_dir: str, ssh_key: str = "", auth_mode: str = "password",
+               auto_update: bool = False) -> int:
     with _lock, _connect() as conn:
         cur = conn.execute(
-            "INSERT INTO devices (name, ip, port, user, password, firmware_dir) "
-            "VALUES (?,?,?,?,?,?)",
-            (name, ip, port, user, password, firmware_dir),
+            "INSERT INTO devices (name, ip, port, user, password, firmware_dir, "
+            "ssh_key, auth_mode, auto_update) VALUES (?,?,?,?,?,?,?,?,?)",
+            (name, ip, port, user, password, firmware_dir,
+             ssh_key or None, auth_mode or "password", 1 if auto_update else 0),
         )
         conn.commit()
         return int(cur.lastrowid)
@@ -181,6 +208,7 @@ def remove_device(device_id: int) -> None:
         conn.execute("DELETE FROM online_status WHERE device_id=?", (device_id,))
         conn.execute("DELETE FROM clients WHERE device_id=?", (device_id,))
         conn.execute("DELETE FROM firmware_state WHERE device_id=?", (device_id,))
+        conn.execute("DELETE FROM update_jobs WHERE device_id=?", (device_id,))
         conn.commit()
 
 
@@ -474,6 +502,69 @@ def list_jobs(limit: int = 100) -> list:
         return [dict(r) for r in conn.execute(
             "SELECT * FROM jobs ORDER BY id DESC LIMIT ?", (limit,))
         ]
+
+
+def update_device(device_id: int, name: str, ip: str, port: int, user: str,
+                  password: str, firmware_dir: str, ssh_key: str = "",
+                  auth_mode: str = "password", auto_update: bool = False) -> None:
+    with _lock, _connect() as conn:
+        conn.execute(
+            "UPDATE devices SET name=?, ip=?, port=?, user=?, password=?, "
+            "firmware_dir=?, ssh_key=?, auth_mode=?, auto_update=? WHERE id=?",
+            (name, ip, port, user, password, firmware_dir,
+             ssh_key or None, auth_mode or "password", 1 if auto_update else 0,
+             device_id))
+        conn.commit()
+
+
+def set_device_auto_update(device_id: int, auto: bool) -> None:
+    with _lock, _connect() as conn:
+        conn.execute("UPDATE devices SET auto_update=? WHERE id=?",
+                     (1 if auto else 0, device_id))
+        conn.commit()
+
+
+def list_auto_update_devices() -> list:
+    with _connect() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM devices WHERE auto_update=1 ORDER BY id")]
+
+
+def add_update_job(device_id: int, name: str, status: str, source: str = "auto",
+                   target_version: str = "", message: str = "") -> int:
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO update_jobs (device_id, name, status, source, "
+            "target_version, message, started_at) "
+            "VALUES (?,?,?,?,?,?,datetime('now'))",
+            (device_id, name, status, source, target_version, message))
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def last_update_job(device_id: int) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM update_jobs WHERE device_id=? ORDER BY id DESC LIMIT 1",
+            (device_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def finish_update_job(job_id: int, status: str, message: str = "") -> None:
+    with _lock, _connect() as conn:
+        conn.execute(
+            "UPDATE update_jobs SET status=?, message=?, finished_at=datetime('now') "
+            "WHERE id=?",
+            (status, message, job_id))
+        conn.commit()
+
+
+def list_update_jobs(limit: int = 100) -> list:
+    with _connect() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT j.*, d.ip AS device_ip FROM update_jobs j "
+            "LEFT JOIN devices d ON d.id=j.device_id "
+            "ORDER BY j.id DESC LIMIT ?", (limit,))]
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ import os
 import re
 import secrets
 import shlex
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -26,7 +27,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, \
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, scheduler
+from . import db, scheduler, updater
 from .sshx import OpenWRT, wait_for_reboot
 
 db.init_db()
@@ -357,6 +358,7 @@ def _device_or_404(device_id: int) -> dict:
 def _mask(row: dict) -> dict:
     out = dict(row)
     out["password"] = "********" if row.get("password") else ""
+    out["ssh_key"] = "********" if row.get("ssh_key") else ""
     return out
 
 
@@ -410,6 +412,9 @@ class DeviceIn(BaseModel):
     user: str = "root"
     password: str = ""
     firmware_dir: str = "https://downloads.openwrt.org/releases"
+    ssh_key: str = ""
+    auth_mode: str = "password"
+    auto_update: bool = False
 
 
 @app.post("/api/devices")
@@ -417,7 +422,9 @@ def api_device_add(d: DeviceIn, _u: dict = Depends(require_admin)):
     if not d.name or not d.ip:
         raise HTTPException(400, "name and ip required")
     did = db.add_device(d.name, d.ip, d.port, d.user, d.password,
-                        d.firmware_dir or "https://downloads.openwrt.org/releases")
+                        d.firmware_dir or "https://downloads.openwrt.org/releases",
+                        ssh_key=d.ssh_key, auth_mode=d.auth_mode,
+                        auto_update=d.auto_update)
     return {"id": did}
 
 
@@ -446,6 +453,32 @@ def api_device_bulk(b: BulkIn, _u: dict = Depends(require_admin)):
 def api_device_delete(device_id: int, _u: dict = Depends(require_admin)):
     _device_or_404(device_id)
     db.remove_device(device_id)
+    return {"ok": True}
+
+
+class DevicePut(BaseModel):
+    name: str
+    ip: str
+    port: int = 22
+    user: str = "root"
+    password: str | None = None
+    firmware_dir: str = "https://downloads.openwrt.org/releases"
+    ssh_key: str | None = None
+    auth_mode: str = "password"
+    auto_update: bool = False
+
+
+@app.put("/api/devices/{device_id}")
+def api_device_update(device_id: int, body: DevicePut,
+                      _u: dict = Depends(require_admin)):
+    row = _device_or_404(device_id)
+    # masked/empty fields keep the stored secret
+    pw = row["password"] if body.password in (None, "", "********") else body.password
+    key = (row.get("ssh_key") or "") if body.ssh_key in (None, "", "********") else body.ssh_key
+    db.update_device(device_id, body.name, body.ip, body.port, body.user, pw,
+                     body.firmware_dir or "https://downloads.openwrt.org/releases",
+                     key, body.auth_mode, body.auto_update)
+    _job(device_id, "device", "ok", "Zugangsdaten aktualisiert")
     return {"ok": True}
 
 
@@ -520,6 +553,67 @@ def api_clients(device_id: int, kind: str = "lan", _u: dict = Depends(auth)):
 # -------------------------------------------------------------- firmware
 
 
+def _probe_remote_image(dev, path: str) -> tuple[int, bytes]:
+    """Size + first 128 bytes of a file on the router."""
+    rc, out, _ = dev.run(f"wc -c < {shlex.quote(path)}", timeout=30)
+    size = int(out.strip() or 0) if rc == 0 else 0
+    rc2, out2, _ = dev.run(
+        f"head -c 128 {shlex.quote(path)} | hexdump -v -e '16/1 \\\"%02x\\\"' 2>/dev/null "
+        f"|| head -c 128 {shlex.quote(path)} | od -An -v -tx1", timeout=30)
+    hexd = re.sub(r"\s+", "", out2)[:256]
+    magic = bytes.fromhex(hexd) if len(hexd) >= 2 else b""
+    return size, magic
+
+
+def _image_ok(size: int, magic: bytes, expected: int = 0) -> bool:
+    if size <= 0:
+        return False
+    # squashfs magic "hsqs" at offset 0x48 – decisive if present
+    if len(magic) > 76 and magic[72:76] == b"hsqs":
+        return expected == 0 or size >= expected * 0.99
+    if magic[:1] == b"<" or b"<html" in magic.lower():
+        return False  # HTML error page, not a firmware image
+    return True
+
+
+def _stage_image_on_device(dev, url: str) -> dict:
+    """Download the firmware image onto the router into /tmp.
+
+    Try a router-side download first (wget/uclient-fetch/curl). Busybox
+    tooling on minimal images often lacks TLS support, so fall back to a
+    server-side download piped over SSH into /tmp when that fails or the
+    file looks invalid.
+    """
+    import urllib.request
+    dest = "/tmp/firmware.bin"
+
+    expected = 0
+    try:
+        req = urllib.request.Request(url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            expected = int(resp.headers.get("Content-Length") or 0)
+    except Exception:
+        expected = 0
+
+    rc, out, _err = dev.download_image(url, dest)
+    size, magic = _probe_remote_image(dev, dest)
+    if "DLRC=0" in out and _image_ok(size, magic, expected):
+        return {"image": dest, "via": "router", "size": size}
+
+    # Fallback: download here (full TLS), pipe to /tmp on the router.
+    with urllib.request.urlopen(url, timeout=300) as resp:
+        data = resp.read()
+    if len(data) < 512 * 1024:
+        raise HTTPException(
+            502, f"Firmware-Download fehlgeschlagen "
+                 f"(nur {len(data)} Bytes statt ~{expected} Bytes)")
+    dev.write_file(dest, data)
+    size, magic = _probe_remote_image(dev, dest)
+    if not _image_ok(size, magic, len(data)):
+        raise HTTPException(502, "Image nach Upload auf Router ungültig")
+    return {"image": dest, "via": "server", "size": size}
+
+
 @app.post("/api/devices/{device_id}/firmware/check")
 def api_firmware_check(device_id: int, _u: dict = Depends(auth)):
     row = _device_or_404(device_id)
@@ -556,13 +650,28 @@ def api_firmware_upgrade(device_id: int,
             if not url:
                 raise HTTPException(400, "keine gültige Image-URL ermittelt")
         db.upsert_online(device_id, True)
-        rc, out, err = dev.sysupgrade(url, preserve_config, test_only)
+        if url.startswith("http://") or url.startswith("https://"):
+            staged = _stage_image_on_device(dev, url)
+            image = staged["image"]
+        else:
+            image = url
+        if not test_only:
+            # Paketstand vor dem Flash merken -> nach dem Reboot
+            # installieren wir Fehlende zurueck (updater.finalize_manual)
+            updater.snapshot_packages(device_id, dev)
+        rc, out, err = dev.sysupgrade(image, preserve_config, test_only)
         if rc != 0 and "started" not in out:
             raise HTTPException(500, f"sysupgrade konnte nicht gestartet werden: {err}")
+        state = db.get_firmware_state(device_id) or {}
+        db.add_update_job(device_id, row["name"],
+                          "done" if test_only else "running", "manual",
+                          state.get("latest_version", "") if not test_only else "",
+                          ("Image-Test beendet" if test_only else
+                           "Update gestartet: %s (preserve=%s)" % (image, preserve_config)))
         _job(device_id, "firmware-upgrade",
              "ok" if test_only else "running",
-             f"{'Test-' if test_only else ''}upgrade gestartet: {url} (preserve={preserve_config})")
-        result = {"started": True, "test": test_only, "url": url}
+             f"{'Test-' if test_only else ''}upgrade gestartet: {url} → {image} (preserve={preserve_config})")
+        result = {"started": True, "test": test_only, "url": url, "image": image}
         if test_only:
             time.sleep(3)
             result["log"] = dev.upgrade_log()
@@ -581,6 +690,7 @@ def api_firmware_wait(device_id: int, timeout_s: int = 300,
     back = time.time()
     ok = wait_for_reboot(dev, wait_s=15, poll=10, timeout=min(timeout_s, 240))
     db.upsert_online(device_id, ok)
+    updater.finalize_manual(device_id, ok)
     return {"online": ok, "waited_s": int(time.time() - back)}
 
 
@@ -720,6 +830,21 @@ def api_central_history(limit: int = 50, _u: dict = Depends(auth)):
 @app.get("/api/jobs")
 def api_jobs(limit: int = 100, _u: dict = Depends(auth)):
     return db.list_jobs(limit)
+
+
+@app.get("/api/update-jobs")
+def api_update_jobs(limit: int = 100, _u: dict = Depends(auth)):
+    return db.list_update_jobs(limit)
+
+
+@app.post("/api/update-jobs/run")
+def api_update_jobs_run(device_id: int = 0,
+                        _adm: dict = Depends(require_admin)):
+    """Update-Pruefung (und ggf. Auto-Update) sofort im Hintergrund starten."""
+    ids = [device_id] if device_id else [d["id"] for d in db.list_devices()]
+    _job(None, "update-check", "running", "sofortiger Update-Check (%d Router)" % len(ids))
+    threading.Thread(target=updater.run_checks, args=(ids,), daemon=True).start()
+    return {"started": True, "devices": len(ids)}
 
 
 # ------------------------------------------------------- survey & actions

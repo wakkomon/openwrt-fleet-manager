@@ -16,6 +16,8 @@ def make_device(row: dict) -> OpenWRT:
     return OpenWRT(
         ip=row["ip"], port=row["port"], user=row["user"],
         password=row["password"], firmware_dir=row.get("firmware_dir") or "",
+        ssh_key=row.get("ssh_key") or "",
+        auth_mode=row.get("auth_mode") or "password",
     )
 
 
@@ -134,23 +136,8 @@ def survey_device(device_id: int) -> None:
 
 
 def check_firmware(device_id: int) -> None:
-    row = db.get_device(device_id)
-    if not row:
-        return
-    dev = make_device(row)
-    if not dev.is_online():
-        db.upsert_online(device_id, False)
-        return
-    db.upsert_online(device_id, True)
-    try:
-        res = dev.check_update()
-        db.set_firmware_state(device_id, res.get("current", ""),
-                              res.get("latest", ""), bool(res.get("has_update")))
-        db.add_job(device_id, "firmware",
-                   "update" if res.get("has_update") else "ok",
-                   json.dumps(res))
-    except Exception as exc:  # pragma: no cover
-        db.add_job(device_id, "firmware", "error", str(exc))
+    from . import updater
+    updater.check_one(device_id)
 
 
 def _all_ids():
@@ -188,6 +175,7 @@ def _initial_surveys():
 
 _scheduler = None
 SURVEY_MINUTES = 5
+UPDATE_CHECK_HOURS = 3
 
 
 def start():
@@ -199,7 +187,7 @@ def start():
                        id="status", max_instances=1, coalesce=True)
     _scheduler.add_job(_survey_all, "interval", minutes=SURVEY_MINUTES,
                        id="survey", max_instances=1, coalesce=True)
-    _scheduler.add_job(_firmware_all, "cron", hour=7, minute=0,
+    _scheduler.add_job(_firmware_all, "interval", hours=UPDATE_CHECK_HOURS,
                        id="firmware", max_instances=1, coalesce=True)
     _scheduler.start()
     _initial_surveys()
