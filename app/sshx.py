@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """SSH operations for OpenWRT routers (paramiko)."""
+import io
+import os
 import re
 import shlex
 import time
@@ -14,22 +16,44 @@ class OpenWRT:
     """One OpenWRT device reachable via SSH."""
 
     def __init__(self, ip: str, port: int = 22, user: str = "root",
-                 password: str = "", firmware_dir: str = "", timeout: int = 15):
+                 password: str = "", firmware_dir: str = "", timeout: int = 15,
+                 ssh_key: str = "", auth_mode: str = "password"):
         self.ip = ip
         self.port = port
         self.user = user
         self.password = password
         self.firmware_dir = firmware_dir or DOWNLOAD_BASE
         self.timeout = timeout
+        self.ssh_key = ssh_key or ""
+        self.auth_mode = auth_mode or "password"
 
     # ------------------------------------------------------------------ SSH
+    def _pkey(self):
+        """Parse private key text (OpenSSH/PEM) into a paramiko key object."""
+        last_exc = None
+        names = ["Ed25519Key", "RSAKey", "ECDSAKey", "DSSKey", "DSKey"]
+        for name in names:
+            cls = getattr(paramiko, name, None)
+            if cls is None:
+                continue
+            try:
+                return cls.from_private_key(io.StringIO(self.ssh_key))
+            except Exception as exc:
+                last_exc = exc
+        raise ValueError("privater SSH-Key nicht lesbar: %s" % last_exc)
+
     def _client(self):
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        kwargs = {}
+        if self.auth_mode == "key" and self.ssh_key:
+            kwargs["pkey"] = self._pkey()
+        else:
+            kwargs["password"] = self.password
         client.connect(
-            self.ip, port=self.port, username=self.user, password=self.password,
+            self.ip, port=self.port, username=self.user,
             timeout=self.timeout, allow_agent=False, look_for_keys=False,
-            banner_timeout=self.timeout, auth_timeout=self.timeout,
+            banner_timeout=self.timeout, auth_timeout=self.timeout, **kwargs
         )
         return client
 
@@ -51,6 +75,127 @@ class OpenWRT:
             return rc == 0
         except Exception:
             return False
+
+    # ------------------------------------------------------ package updates
+    def package_check(self, refresh: bool = True) -> dict:
+        """Upgradable packages via opkg/apk/rpm (whichever the device has).
+
+        Returns {"pkgman", "count", "packages": ["name [cur -> new]", ...],
+        "error": str|None}. Refreshes indexes first unless refresh=False."""
+        rc, out, _ = self.run("which opkg apk rpm 2>/dev/null", timeout=15)
+        managers = [os.path.basename(w.strip()) for w in out.split() if w.strip()]
+        if not managers:
+            return {"pkgman": "", "count": 0, "packages": [],
+                    "error": "kein Paketmanager gefunden"}
+        pm = managers[0]
+        err = None
+        if pm == "opkg":
+            if refresh:
+                rc2, _, e2 = self.run("opkg update 2>&1 | tail -1", timeout=180)
+                if rc2 != 0:
+                    err = f"opkg update: {(e2 or '')}"[:160]
+            rc3, out3, e3 = self.run(
+                "opkg list-upgradable 2>/dev/null | "
+                "awk '{print $1\" [\"$3\" -> \"$5\"]\"}' | head -40", timeout=120)
+        elif pm == "apk":
+            if refresh:
+                rc2, _, e2 = self.run("apk update 2>&1 | tail -1", timeout=180)
+                if rc2 != 0:
+                    err = f"apk update: {(e2 or '')}"[:160]
+            # apk-tools v3 (OpenWrt >= 24): "apk version -l '<'" lists upgradable.
+            rc3, out3, e3 = self.run("apk version -l '<' 2>/dev/null", timeout=120)
+            pkgs = []
+            for line in out3.splitlines():
+                m = re.match(r"(.+?)-(\d[^ ]*)\s*<\s*(\S+)", line.strip())
+                if m:
+                    pkgs.append(f"{m.group(1)} [{m.group(2)} -> {m.group(3)}]")
+            return {"pkgman": "apk", "count": len(pkgs), "packages": pkgs[:12],
+                    "error": err}
+        else:
+            rc3, out3, e3 = self.run(
+                "rpm -q -a --queryformat "
+                "'%{NAME} [%{VERSION} -> %{UPPERVERSION}]\\n' "
+                "2>/dev/null | grep '\\[.*-> .*\\]' | grep -v '-> \\]' | head -40",
+                timeout=180)
+        if rc3 != 0 and not out3.strip():
+            err = err or f"{pm} list-upgradable: {(e3 or '')}"[:160]
+        pkgs = [l.strip() for l in out3.splitlines() if l.strip()]
+        return {"pkgman": pm, "count": len(pkgs), "packages": pkgs[:12],
+                "error": err}
+
+    # --------------------------------------- package set (sysupgrade backup)
+    _WORLD_CMD = {
+        "apk": "cat /etc/apk/world 2>/dev/null",
+        "opkg": "opkg list-installed 2>/dev/null | awk '{print $1}'",
+    }
+
+    def installed_packages(self) -> dict:
+        """Installierte Paketnamen des Routers (Basis für Re-Install nach
+        sysupgrade). apk: /etc/apk/world, opkg: list-installed.
+        Returns {"pkgman", "names": [...], "error"}."""
+        rc, out, _ = self.run("which opkg apk 2>/dev/null", timeout=15)
+        managers = [w.strip().rsplit("/", 1)[-1] for w in out.split()
+                    if w.strip()]
+        pm = "apk" if "apk" in managers else ("opkg" if "opkg" in managers
+                                              else "")
+        if not pm:
+            return {"pkgman": "", "names": [],
+                    "error": "kein Paketmanager gefunden"}
+        rc2, out2, e2 = self.run(self._WORLD_CMD[pm], timeout=60)
+        # Versions-Pins ("base-files=1711~x") abschneiden -> nur Paketnamen
+        names = sorted({line.strip().split("=")[0].strip()
+                        for line in out2.splitlines() if line.strip()})
+        err = None if rc2 == 0 else (e2 or out2 or "rc=%s" % rc2)[:160]
+        return {"pkgman": pm, "names": names, "error": err}
+
+    def reinstall_packages(self, names: list,
+                           timeout: int = 300) -> dict:
+        """Fehlende Pakete nach sysupgrade nachinstallieren (apk add /
+        opkg install). Batchweise (20); fehlt das Index-Cache-Problem, wird
+        einmal `apk update` nachgeschoben. Returns
+        {"pkgman", "installed": [...], "failed": [...], "error"}."""
+        snap = self.installed_packages()
+        pm = snap.get("pkgman", "")
+        have = set(snap.get("names", []))
+        todo = [n for n in names if n and n not in have]
+        res = {"pkgman": pm, "installed": [], "failed": list(todo),
+               "error": None}
+        if not todo:
+            res["failed"] = []
+            return res
+        if not pm:
+            res["error"] = snap.get("error") or "kein Paketmanager"
+            return res
+        cmd = "apk add" if pm == "apk" else "opkg install"
+
+        def _try(batch: list) -> bool:
+            q = " ".join(shlex.quote(n) for n in batch)
+            rc, out, err = self.run(f"{cmd} {q} 2>&1 | tail -4",
+                                    timeout=timeout)
+            if rc != 0 and pm == "apk":
+                # Index evtl. leer (fresh flash) -> einmal nachziehen
+                self.run("apk update >/dev/null 2>&1", timeout=timeout)
+                rc, out, err = self.run(f"{cmd} {q} 2>&1 | tail -4",
+                                        timeout=timeout)
+            if rc != 0:
+                res["error"] = res["error"] or \
+                    f"rc={rc}: {(out or err or '')}"[:200]
+            return rc == 0
+
+        for i in range(0, len(todo), 20):
+            batch = todo[i:i + 20]
+            if _try(batch):
+                res["installed"].extend(batch)
+            else:
+                # Batch fehlgeschlagen (ein unpublishbares Paket blockiert
+                # alles) -> einzeln weiter, damit der Rest nicht verliert
+                for n in batch:
+                    if _try([n]):
+                        res["installed"].append(n)
+                    else:
+                        pass
+        res["failed"] = [n for n in todo if n not in res["installed"]]
+        return res
 
     # ---------------------------------------------------- file transfer
     # Minimal images (e.g. without LuCI) often lack SFTP, base64 and busybox,
@@ -371,19 +516,46 @@ class OpenWRT:
         }
 
     # --------------------------------------------------------- sysupgrade
+    def download_image(self, url: str, dest: str = "/tmp/firmware.bin",
+                       timeout: int = 600) -> tuple[int, str, str]:
+        """Download the firmware image onto the router into /tmp.
+
+        Tries the router's own fetchers (wget / uclient-fetch / curl) so
+        the image lands in /tmp before sysupgrade is started. Busybox
+        wget often lacks TLS support, so callers should fall back to a
+        server-side download (see main._stage_image_on_device) when this
+        fails or the file looks truncated.
+        """
+        url_q, dest_q = shlex.quote(url), shlex.quote(dest)
+        cmd = (
+            f"rm -f {dest_q}; "
+            f"(command -v wget >/dev/null 2>&1 && wget -O {dest_q} {url_q} "
+            f"|| command -v uclient-fetch >/dev/null 2>&1 && uclient-fetch -o {dest_q} {url_q} "
+            f"|| command -v curl >/dev/null 2>&1 && curl -fsSL -o {dest_q} {url_q}) "
+            f"2>&1; echo DLRC=$?"
+        )
+        return self.run(cmd, timeout=timeout)
+
     def sysupgrade(self, url: str, preserve_config: bool = True,
                    test_only: bool = False) -> tuple[int, str, str]:
         """Run sysupgrade on the device.
 
-        The command is started detached (nohup + background) so the SSH
-        session closing does not kill it while the router reboots.
+        `url` may be an http(s) URL or a local path (e.g. an image that
+        was pre-downloaded into /tmp via download_image()).
+        The command is started via `setsid` in a new session so closing
+        the SSH session does not kill it while the router reboots.
+        (BusyBox has no `nohup`; setsid is present on OpenWrt.)
         """
         preserve = " -c" if preserve_config else ""
         test = " -T" if test_only else ""
         cmd = (
-            "nohup sh -c '"
+            "setsid sh -c '"
+            f"echo openwrtfleet-sysupgrade-gestartet-$(date) > /tmp/openwrtfleet.log; "
             f"sysupgrade{preserve}{test} {shlex.quote(url)} "
-            f"> /tmp/openwrtfleet.log 2>&1' >/dev/null 2>&1 & echo started"
+            f">>/tmp/openwrtfleet.log 2>&1; "
+            f"echo openwrtfleet-sysupgrade-beendet-rc=$?-$(date) "
+            f">>/tmp/openwrtfleet.log' </dev/null >/dev/null 2>&1 "
+            "& echo started"
         )
         return self.run(cmd, timeout=30)
 

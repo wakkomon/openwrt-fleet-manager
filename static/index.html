@@ -91,6 +91,7 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
     <button class="btn ghost small active" data-tab="dashboard" onclick="showTab('dashboard')">Dashboard</button>
     <button class="btn ghost small" data-tab="router" onclick="showTab('router')">Router</button>
     <button class="btn ghost small" data-tab="clients" onclick="showTab('clients')">Client-Suche</button>
+    <button class="btn ghost small" data-tab="updatejobs" onclick="showTab('updatejobs')">Update-Jobs</button>
     <button class="btn ghost small" data-tab="users" id="usersTab" onclick="showTab('users')" style="display:none">Benutzer</button>
   </div>
 
@@ -155,7 +156,7 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
         <tbody></tbody>
       </table>
       <p class="hint" style="margin-top:10px">Automatisiert: Status alle 60 s · Endgeräte-Scan alle 5 min ·
-      Firmware-Prüfung täglich 07:00. Der Router-Name wird automatisch aus dem Hostnamen aktualisiert
+      Update-Check alle 3 Stunden. Der Router-Name wird automatisch aus dem Hostnamen aktualisiert
       (manuelle Umbenennungen gewinnen).</p>
     </div>
 
@@ -181,6 +182,23 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
   </div>
 
   <!-- ================= CLIENT SEARCH ================= -->
+  <!-- ================= UPDATE JOBS ================= -->
+  <div id="tab-updatejobs" style="display:none">
+    <div class="card">
+      <h2>Update-Jobs</h2>
+      <div class="row" style="margin-bottom:10px">
+        <button class="btn small" onclick="runUpdateChecks()">Jetzt prüfen</button>
+        <span class="hint">Firmware- und Paket-Update-Check automatisch alle 3 Stunden. Auto-Update (Flash) nur für Router mit aktiviertem Schalter im Detail-Dialog.</span>
+      </div>
+      <table id="ujTable">
+        <thead><tr><th>Zeit</th><th>Router</th><th>Auslöser</th><th>Status</th>
+        <th>Ziel-Version</th><th>Meldung</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div id="ujMsg" class="hint" style="margin-top:8px"></div>
+    </div>
+  </div>
+
   <div id="tab-clients" style="display:none">
     <div class="card">
       <h2>Client-Suche (Hostname / MAC / IP)</h2>
@@ -248,6 +266,35 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
       <button class="btn ghost small" onclick="closeDev()">✕</button>
     </div>
     <div id="dInfo" class="row" style="margin:10px 0 14px"></div>
+    <div class="card" style="margin:0 0 14px">
+      <div class="row" style="justify-content:space-between">
+        <h2 style="margin:0">Zugang &amp; Auto-Update</h2>
+        <button class="btn small ghost" onclick="toggleEditAccess()">Bearbeiten</button>
+      </div>
+      <div id="eAccess" style="display:none">
+        <div class="grid2">
+          <div><label>Name</label><input id="eName"></div>
+          <div><label>IP / Host</label><input id="eIp"></div>
+          <div><label>SSH-Port</label><input id="ePort"></div>
+          <div><label>SSH-User</label><input id="eUser"></div>
+        </div>
+        <label>SSH-Passwort (******** = behalten)</label><input id="ePass" type="password">
+        <label>Login-Art</label>
+        <select id="eMode" onchange="document.getElementById('eKeyRow').style.display=this.value==='key'?'':'none'">
+          <option value="password">Passwort</option><option value="key">Privater SSH-Key</option>
+        </select>
+        <div id="eKeyRow" style="display:none">
+          <label>Privater Schlüssel (******** = behalten; leer = keiner)</label>
+          <textarea id="eKey" rows="5"></textarea>
+        </div>
+        <label>Firmware-Quelle</label><input id="eFwDir">
+        <label style="display:flex;align-items:center;gap:6px;margin-top:8px"><input type="checkbox" id="eAuto" style="width:auto"> Automatische Firmware-Updates erlauben</label>
+        <div class="row" style="margin-top:10px;justify-content:flex-end">
+          <button class="btn" onclick="saveDeviceEdit()">Speichern</button>
+        </div>
+      </div>
+      <div id="eMsg" class="hint" style="margin-top:6px"></div>
+    </div>
     <div class="row" style="margin-bottom:14px">
       <button class="btn small" onclick="devSurvey(currentDev)">↻ Jetzt scannen</button>
       <button class="btn small ghost" onclick="devRename(currentDev)">✎ Umbenennen</button>
@@ -293,8 +340,8 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
           <label style="margin:0;display:flex;align-items:center;gap:6px"><input type="checkbox" id="dPreserve" checked style="width:auto"> Konfiguration behalten (-c)</label>
         </div>
         <div class="row" style="margin-top:10px">
-          <button class="btn warn" onclick="fwUpgrade(currentDev,false)">⚠ Image-Test (sysupgrade -T)</button>
-          <button class="btn ok" onclick="fwUpgrade(currentDev,true)">Firmware-Update durchführen</button>
+          <button class="btn warn" onclick="fwUpgrade(currentDev,true)">⚠ Image-Test (sysupgrade -T)</button>
+          <button class="btn ok" onclick="fwUpgrade(currentDev,false)">Firmware-Update durchführen</button>
         </div>
         <div id="dFwLog" style="margin-top:10px" class="log" hidden></div>
       </div>
@@ -329,6 +376,16 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
       <div><label>SSH-User</label><input id="aUser" value="root"></div>
     </div>
     <label>SSH-Passwort</label><input id="aPass" type="password" placeholder="OpenWRT-Root-Passwort">
+    <label>Login-Art</label>
+    <select id="aMode" onchange="document.getElementById('aKeyRow').style.display=this.value==='key'?'':'none'">
+      <option value="password">Passwort</option>
+      <option value="key">Privater SSH-Key (zusätzlich zum Passwort)</option>
+    </select>
+    <div id="aKeyRow" style="display:none">
+      <label>Privater Schlüssel (PEM / OpenSSH)</label>
+      <textarea id="aKey" rows="6" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"></textarea>
+    </div>
+    <label style="display:flex;align-items:center;gap:6px;margin-top:10px"><input type="checkbox" id="aAuto" style="width:auto"> Automatische Firmware-Updates erlauben</label>
     <label>Firmware-Quelle</label><input id="aFwDir" value="https://downloads.openwrt.org/releases">
     <div class="row" style="margin-top:16px;justify-content:flex-end">
       <button class="btn ghost" onclick="hideAddDevice()">Abbrechen</button>
@@ -398,13 +455,14 @@ function fmtTime(t){ return t? String(t).replace('T',' ').slice(0,16): '—'; }
 
 /* ---------- tabs ---------- */
 function showTab(name){
-  ['dashboard','router','clients','users'].forEach(t=>{
+  ['dashboard','router','clients','updatejobs','users'].forEach(t=>{
     $('#tab-'+t).style.display = (t===name)?'':'none';
   });
   document.querySelectorAll('.tabbar .btn').forEach(b=>
     b.classList.toggle('active', b.dataset.tab===name));
   if(name==='dashboard') loadDashboard();
   if(name==='clients') loadAllClients();
+  if(name==='updatejobs') refreshUpdateJobs();
   if(name==='users') loadUsers();
 }
 
@@ -423,7 +481,7 @@ async function logout(){ await api('/api/logout',{method:'POST'}); location.repl
 /* ---------- device list ---------- */
 async function refreshAll(){
   devices=await api('/api/devices')||[];
-  renderDevices(); renderCentralSelect(); refreshJobs();
+  renderDevices(); renderCentralSelect(); refreshJobs(); refreshUpdateJobs();
   $('#health').textContent=devices.filter(d=>d.status&&d.status[0]===1).length+' von '
     +devices.length+' Router online';
   if(currentDev) renderDevInfoBar(currentDev);
@@ -455,7 +513,7 @@ function renderDevices(){
     const st=d.status; const on=st&&st[0]===1; const info=d.info||{};
     return `<tr>
       <td><span class="dot ${on?'on':'off'}"></span>${fmtTime(st&&st[1])}</td>
-      <td><b>${esc(d.name)}</b><br><span class="hint mono">${esc(d.ip)}</span></td>
+      <td><b>${esc(d.name)}</b> ${authPill(d)}<br><span class="hint mono">${esc(d.ip)}</span></td>
       <td>${esc(info.model||'')} <span class="hint mono">${esc(info.target||'')}</span></td>
       <td class="mono">${esc(info.version||'—')}</td>
       <td>${fmtUptime(info.uptime_s)}</td>
@@ -470,6 +528,12 @@ function renderDevices(){
       </td></tr>`;
   }).join('')||'<tr><td colspan="9" class="hint">Keine Router – „+ Router“ oben rechts.</td></tr>';
 }
+function authPill(d){
+  let h='';
+  if(d.auth_mode==='key') h+=' <span class="pill info">Key</span>';
+  if(d.auto_update) h+=' <span class="pill upd">Auto</span>';
+  return h;
+}
 function fwPill(d){
   const f=d.firmware;
   if(!f) return '<span class="pill cur">—</span>';
@@ -480,15 +544,19 @@ async function checkStatus(id){ await api(`/api/devices/${id}/status`,{method:'P
 async function delDev(id){ await api(`/api/devices/${id}`,{method:'DELETE'}); refreshAll(); }
 
 /* ---------- add device / bulk ---------- */
-function showAddDevice(){$('#aModal').style.display='block';}
+function showAddDevice(){$('#aModal').style.display='block';
+  if($('#aMode')){$('#aMode').value='password';$('#aKeyRow').style.display='none';$('#aAuto').checked=false;}}
 function hideAddDevice(){$('#aModal').style.display='none';}
 async function addDevice(){
   const body={name:$('#aName').value.trim(),ip:$('#aIp').value.trim(),
     port:parseInt($('#aPort').value)||22,user:$('#aUser').value.trim()||'root',
-    password:$('#aPass').value,firmware_dir:$('#aFwDir').value.trim()};
+    password:$('#aPass').value,firmware_dir:$('#aFwDir').value.trim(),
+    ssh_key:$('#aKey')?$('#aKey').value:'',auth_mode:$('#aMode').value,
+    auto_update:!!($('#aAuto')&&$('#aAuto').checked)};
   if(!body.name||!body.ip){alert('Name und IP erforderlich');return;}
-  await api('/api/devices',{method:'POST',headers:{'Content-Type':'application/json'},
+  const r=await api('/api/devices',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(body)});
+  if(r){['aName','aIp','aPass'].forEach(i=>$('#'+i).value=''); if($('#aKey'))$('#aKey').value='';}
   hideAddDevice(); refreshAll();
 }
 function showBulk(){$('#bModal').style.display='block'; updateBulkPreview();}
@@ -503,14 +571,14 @@ function bulkEntries(){
     for(let i=from;i<=to;i++){
       const ip=pfx+i;
       if(!seen.has(ip)){ seen.add(ip); out.push({name:npfx+i,ip,port,user,password:pass,
-        firmware_dir:'https://downloads.openwrt.org/releases'}); }
+        firmware_dir:'https://downloads.openwrt.org/releases',auth_mode:'password',auto_update:false}); }
     }
   }
   $('#bList').value.split(/\r?\n/).forEach(line=>{
     const [name,ip]=line.split(';').map(s=>(s||'').trim());
     if(!ip||seen.has(ip))return; seen.add(ip);
     out.push({name:name||ip,ip,port,user,password:pass,
-      firmware_dir:'https://downloads.openwrt.org/releases'});
+      firmware_dir:'https://downloads.openwrt.org/releases',auth_mode:'password',auto_update:false});
   });
   return out;
 }
@@ -654,11 +722,23 @@ async function loadHistory(id){
 /* ---------- firmware (unchanged behaviour) ---------- */
 function renderFw(id){
   const d=devices.find(x=>x.id===id); const f=d&&d.firmware;
-  if(!f){$('#dFw').textContent='';$('#dFwDetail').textContent='';return;}
+  const pk=(d&&d.info&&d.info.packages)||null;
+  let pkgline='';
+  if(pk){
+    if(pk.error) pkgline=`<div class="hint">Paket-Check: Fehler: ${esc(pk.error)}</div>`;
+    else if(pk.count) pkgline=`<div class="hint" style="color:var(--amber,#ffb020)">Paket-Updates: <b>${pk.count}</b> aktualisierbar (${esc(pk.pkgman||'')})${pk.packages&&pk.packages.length?': '+esc(pk.packages.slice(0,6).join(', ')):''}</div>`;
+    else pkgline=`<div class="hint">Paket-Updates: keine offen (${esc(pk.pkgman||'')}</div>`;
+  }
+  const pr=(d&&d.info&&d.info.pkg_restore)||null;
+  if(pr){
+    if(pr.pending) pkgline+=`<div class="hint" style="color:var(--info)"><b>Paket-Restore ausstehend:</b> ${esc(String((pr.names||[]).length))} Pakete vorgemerkt — werden nach dem Reboot automatisch nachinstalliert.</div>`;
+    else pkgline+=`<div class="hint">Letzter Paket-Restore: ${esc(pr.status||'?')}${pr.result?' — '+esc(pr.result):''}</div>`;
+  }
+  if(!f){$('#dFw').textContent='';$('#dFwDetail').innerHTML=pkgline;return;}
   $('#dFw').innerHTML=f.has_update
     ? `Installiert <b>${esc(f.current_version)}</b> → verfügbar <b>${esc(f.latest_version)}</b>`
     : `Installiert <b>${esc(f.current_version)}</b> (aktuell)`;
-  $('#dFwDetail').textContent=f.url?('Image: '+f.url):'';
+  $('#dFwDetail').innerHTML=(f.url?('Image: '+esc(f.url)+'<br>'):'')+pkgline;
 }
 async function fwCheck(id){
   const r=await api(`/api/devices/${id}/firmware/check`,{method:'POST'});
@@ -995,6 +1075,51 @@ async function refreshJobs(){
   $('#jobs').innerHTML=(j||[]).map(x=>
     `<div class="rowline"><span class="mono">${esc(x.created_at)}</span>
      <span>${esc(x.kind)} · ${esc(x.message).slice(0,90)}</span></div>`).join('')||'<div class="hint">noch keine</div>';
+}
+
+const UJ_STATUS={'up-to-date':'cur','update-available':'upd','pkg-update':'upd',
+  'queued':'info','running':'info','done':'cur','error':'err','offline':'err'};
+async function refreshUpdateJobs(){
+  const tb=document.querySelector('#ujTable tbody'); if(!tb)return;
+  const j=await api('/api/update-jobs?limit=60');
+  tb.innerHTML=(j||[]).map(x=>`<tr>
+    <td class="mono">${esc((x.started_at||x.created_at||'').replace('T',' ').slice(0,16))}</td>
+    <td>${esc(x.name)} <span class="hint mono">${esc(x.device_ip||'')}</span></td>
+    <td>${esc(x.source)}</td>
+    <td><span class="pill ${UJ_STATUS[x.status]||'info'}">${esc(x.status)}</span></td>
+    <td class="mono">${esc(x.target_version||'—')}</td>
+    <td class="hint">${esc(x.message||'').slice(0,140)}</td></tr>`).join('')
+    ||'<tr><td colspan="6" class="hint">noch keine Update-Jobs</td></tr>';
+}
+async function runUpdateChecks(){
+  $('#ujMsg').textContent='Prüfung läuft …';
+  const r=await api('/api/update-jobs/run',{method:'POST'});
+  if(r){ setTimeout(()=>{ refreshAll(); $('#ujMsg').textContent=''; },10000); }
+}
+function toggleEditAccess(){
+  const el=$('#eAccess'); const show=el.style.display==='none';
+  el.style.display=show?'':'none';
+  if(show){
+    const d=devices.find(x=>x.id===currentDev)||{};
+    $('#eName').value=d.name||''; $('#eIp').value=d.ip||'';
+    $('#ePort').value=d.port||22; $('#eUser').value=d.user||'root';
+    $('#ePass').value=d.password||''; $('#eMode').value=d.auth_mode||'password';
+    $('#eKey').value=d.ssh_key||''; $('#eKeyRow').style.display=(d.auth_mode==='key')?'':'none';
+    $('#eFwDir').value=d.firmware_dir||'https://downloads.openwrt.org/releases';
+    $('#eAuto').checked=!!d.auto_update;
+  }
+}
+async function saveDeviceEdit(){
+  const d=devices.find(x=>x.id===currentDev)||{};
+  const body={name:$('#eName').value.trim(),ip:$('#eIp').value.trim(),
+    port:parseInt($('#ePort').value)||22,user:$('#eUser').value.trim()||'root',
+    password:$('#ePass').value,ssh_key:$('#eKey').value,
+    auth_mode:$('#eMode').value,firmware_dir:$('#eFwDir').value.trim(),
+    auto_update:$('#eAuto').checked};
+  if(!body.name||!body.ip){alert('Name und IP erforderlich');return;}
+  const r=await api(`/api/devices/${currentDev}`,{method:'PUT',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(r){ $('#eMsg').textContent='Gespeichert ✓'; $('#eAccess').style.display='none'; await refreshAll(); }
 }
 
 loadMe();
