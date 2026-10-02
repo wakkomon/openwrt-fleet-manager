@@ -62,6 +62,33 @@ def scan_clients(device_id: int) -> None:
         db.add_job(device_id, "scan", "error", str(exc))
 
 
+def poll_lldp(device_id: int) -> None:
+    """LLDP-Poll: lldpctl -f json auf dem Router, Nachbarn + lokales Chassis
+    in SQLite persistieren. Reverse-DNS (Hostname) erfolgt bereits in
+    `poll_lldp` des sshx-Layers. Fehler werden als Job + Status vermerkt,
+    die gespeicherte Topologie bleibt dabei erhalten."""
+    row = db.get_device(device_id)
+    if not row:
+        return
+    dev = make_device(row)
+    try:
+        res = dev.poll_lldp()
+    except Exception as exc:  # pragma: no cover
+        db.upsert_online(device_id, False)
+        db.add_job(device_id, "lldp", "error", str(exc))
+        return
+    if res.get("error") and not res.get("neighbors"):
+        # lldpd fehlt/laeuft nicht — Status merken, nichts loeschen
+        db.save_lldp(device_id, res, [])
+        db.add_job(device_id, "lldp", "ok",
+                   "lldpd %s (%s)" % (res.get("lldpd"), res["error"][:60]))
+        return
+    db.upsert_online(device_id, True)
+    db.save_lldp(device_id, res, res.get("neighbors", []))
+    db.add_job(device_id, "lldp", "ok",
+               "%d Nachbarn" % len(res.get("neighbors", [])))
+
+
 def survey_device(device_id: int) -> None:
     """One SSH round-trip -> everything into the cache:
     uptime, hostname (auto-rename), model/version, WLAN SSIDs+channels,
@@ -155,6 +182,14 @@ def _status_all():
         check_status(did)
 
 
+def _lldp_all():
+    for did in _all_ids():
+        try:
+            poll_lldp(did)
+        except Exception as exc:  # pragma: no cover
+            db.add_job(did, "lldp", "error", str(exc))
+
+
 def _survey_all():
     for did in _all_ids():
         try:
@@ -176,12 +211,15 @@ def _initial_surveys():
         import time
         time.sleep(3)
         _survey_all()
+        time.sleep(1)
+        _lldp_all()
     threading.Thread(target=run, daemon=True).start()
 
 
 _scheduler = None
 SURVEY_MINUTES = 5
 UPDATE_CHECK_HOURS = 3
+LLDP_MINUTES = 2
 
 
 def start():
@@ -191,6 +229,8 @@ def start():
     _scheduler = BackgroundScheduler(timezone="UTC")
     _scheduler.add_job(_status_all, "interval", seconds=60,
                        id="status", max_instances=1, coalesce=True)
+    _scheduler.add_job(_lldp_all, "interval", minutes=LLDP_MINUTES,
+                       id="lldp", max_instances=1, coalesce=True)
     _scheduler.add_job(_survey_all, "interval", minutes=SURVEY_MINUTES,
                        id="survey", max_instances=1, coalesce=True)
     _scheduler.add_job(_firmware_all, "interval", hours=UPDATE_CHECK_HOURS,

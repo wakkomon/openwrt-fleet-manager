@@ -15,6 +15,7 @@ import os
 import re
 import secrets
 import shlex
+import socket
 import threading
 import time
 import uuid
@@ -1092,6 +1093,154 @@ def api_all_clients(_u: dict = Depends(auth)):
                 })
     out.sort(key=lambda x: (x["device"], x["kind"], x["mac"]))
     return out
+
+
+# ------------------------------------------------------------- LLDP / topology
+def _lldp_node(device_id: int, row: dict) -> dict:
+    """Lokales Chassis + Nachbarn eines Geräts für die Topologieansicht."""
+    local = db.lldp_local(device_id) or {}
+    neighbors = db.lldp_neighbors(device_id)
+    # Nachbarn identifizieren: ist der Nachbar ein bekanntes Gerät
+    # (Name aus LLDP oder MAC = lokales Chassis eines bekannten Geräts)?
+    known = db.list_devices()
+    by_name = {(d.get("name") or "").lower(): d for d in known}
+    by_mac = {}
+    for d in known:
+        m = (db.lldp_local(d["id"]) or {}).get("mac") or ""
+        if m:
+            by_mac[m.lower()] = d
+    for n in neighbors:
+        n["local_port"] = n.get("iface") or ""
+        n["neighbor_port"] = n.get("port_id") or n.get("port_descr") or ""
+        peer = None
+        label = (n.get("neighbor_name") or "").strip().lower()
+        if label:
+            peer = by_name.get(label)
+        if not peer and n.get("mac"):
+            peer = by_mac.get(n["mac"].lower())
+        n["peer_device_id"] = peer["id"] if peer else None
+        n["is_known"] = bool(peer)
+        n["peer_name"] = peer["name"] if peer else (
+            n.get("neighbor_name") or n.get("hostname") or n.get("mgmt_ip") or "unbekannt")
+    return {
+        "device_id": device_id,
+        "name": row.get("name", ""),
+        "ip": row.get("ip", ""),
+        "state": row.get("state", "unknown"),
+        "lldpd": local.get("lldpd") or "unknown",
+        "version": local.get("version") or "",
+        "error": local.get("error") or "",
+        "local": {
+            "chassis_id": local.get("chassis_id") or "",
+            "mac": local.get("mac") or "",
+            "name": local.get("name") or "",
+            "descr": local.get("descr") or "",
+            "mgmt_ip": local.get("mgmt_ip") or "",
+            "updated_at": local.get("updated_at") or "",
+        },
+        "neighbors": neighbors,
+    }
+
+
+def _client_mac_map() -> dict:
+    """MAC -> (hostname, ip) aus allen erfassten Clients (ARP/WLAN).
+
+    Das ist die „MAC-Tabelle“: ARP-/DHCP-Einträge aller Router liefern pro
+    MAC-Adresse den bekannten Rechnernamen — zuverlässiger als ein PTR-Name."""
+    m = {}
+    for d in db.list_devices():
+        for kind in ("lan", "wlan"):
+            for c in db.list_clients(d["id"], kind):
+                mac = (c.get("mac") or "").lower()
+                if not mac:
+                    continue
+                host = (c.get("hostname") or "").strip()
+                ip = (c.get("ip") or "").strip()
+                if mac not in m or (not m[mac][0] and host):
+                    m[mac] = (host, ip)
+    return m
+
+
+def _enrich_neighbors(nodes: list) -> list:
+    """Unbekannte Nachbarn per MAC-Tabelle und Reverse-DNS anreichern.
+
+    - MAC -> Rechnername aus den erfassten Clients (ARP/WLAN-MAC-Tabelle)
+    - mgmt_ip ohne Namen -> Reverse-DNS (PTR-Lookup)
+    Ergebnis landet in ``hostname`` + ``name_source``; peer_name folgt daraus."""
+    mac_map = _client_mac_map()
+    for node in nodes:
+        for n in node["neighbors"]:
+            name_source = n.get("name_source") or ""
+            mac = (n.get("mac") or "").lower()
+            # 1) MAC -> Hostname aus der MAC-Tabelle (Clients)
+            if mac and mac in mac_map and mac_map[mac][0]:
+                n["hostname"] = mac_map[mac][0]
+                name_source = "clients"
+            # 2) Reverse-DNS der Management-IP, falls sonst kein Name bekannt
+            ip = (n.get("mgmt_ip") or "").strip()
+            if ip and not (n.get("hostname") or (n.get("neighbor_name") or "")):
+                try:
+                    rdn = socket.gethostbyaddr(ip)[0]
+                    if rdn:
+                        n["hostname"] = rdn
+                        name_source = "dns"
+                except (socket.herror, socket.gaierror, OSError):
+                    pass
+            n["name_source"] = name_source
+            # peer_name für unbekannte Geräte ggf. durch den aufgelösten Namen
+            if not n["is_known"]:
+                n["peer_name"] = (
+                    n.get("hostname") or n.get("neighbor_name")
+                    or n.get("mgmt_ip") or "unbekannt")
+    return nodes
+
+
+@app.get("/api/topology")
+def api_topology(_u: dict = Depends(auth)):
+    """Aggregierte Topologie (UniFi-artig) für die Graph-View.
+
+    Jedes Gerät inkl. lokalem Chassis + Nachbarn (bereits identifiziert,
+    ob der Nachbar ein bekanntes Gerät ist oder nicht; unbekannte Nachbarn
+    sind per MAC-Tabelle / Reverse-DNS mit Hostnamen angereichert)."""
+    nodes = []
+    for d in db.list_devices():
+        nodes.append(_lldp_node(d["id"], d))
+    return {"devices": _enrich_neighbors(nodes)}
+
+
+@app.get("/api/devices/{device_id}/lldp")
+def api_lldp(device_id: int, _u: dict = Depends(auth)):
+    """LLDP-Daten (lokal + Nachbarn) eines einzelnen Geräts, unbekannte
+    Nachbarn per MAC-Tabelle / Reverse-DNS angereichert."""
+    row = _device_or_404(device_id)
+    return _enrich_neighbors([_lldp_node(device_id, row)])[0]
+
+
+@app.post("/api/devices/{device_id}/lldp/scan")
+def api_lldp_scan(device_id: int, _u: dict = Depends(auth)):
+    """LLDP sofort neu pollen (ohne auf den 2-min-Timer zu warten)."""
+    row = _device_or_404(device_id)
+    scheduler.poll_lldp(device_id)
+    return _lldp_node(device_id, row)
+
+
+@app.post("/api/devices/{device_id}/lldp/activate")
+def api_lldp_activate(device_id: int, _u: dict = Depends(auth)):
+    """lldpd auf dem Router (ggf. nach apk add) starten — bleibt nach Reboot aktiv."""
+    row = _device_or_404(device_id)
+    dev = scheduler.make_device(row)
+    if not dev.is_online():
+        raise HTTPException(502, "Router nicht erreichbar")
+    try:
+        res = dev.activate_lldp()
+    except Exception as exc:
+        raise HTTPException(502, "lldpd-Aktivierung fehlgeschlagen: %s" % exc)
+    db.add_job(device_id, "lldp", "ok" if res.get("ok") else "error",
+               ("lldpd aktiviert" if res.get("ok") else "Aktivierung fehlerhaft")
+               + ": " + (res.get("output") or "")[:120])
+    # direkt nachpollen, damit die neue Topologie sichtbar ist
+    scheduler.poll_lldp(device_id)
+    return res
 
 
 @app.get("/health")
