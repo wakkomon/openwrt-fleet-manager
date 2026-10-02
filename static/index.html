@@ -143,6 +143,7 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
       <h2>Routers</h2>
       <table id="devTable">
         <thead><tr>
+          <th style="width:30px" title="Für „Zentrale Konfiguration“ wählen"><input type="checkbox" id="ckAll" style="width:auto" onclick="toggleAllDev(this.checked)" title="Alle wählen"></th>
           <th class="sortable" onclick="setSort('status')">Status <span class="arrow" id="ar-status"></span></th>
           <th class="sortable" onclick="setSort('name')">Name / IP <span class="arrow" id="ar-name"></span></th>
           <th>Modell / Board</th>
@@ -164,8 +165,7 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
     <div class="grid2">
       <div class="card">
         <h2>Zentrale Konfiguration (uci)</h2>
-        <label>Router auswählen</label>
-        <select id="cDev" multiple size="5"></select>
+        <p class="hint" style="margin:0 0 8px">Router oben in der Tabelle per Checkbox wählen (Spalte ganz links), dann uci-Wert(e) unten setzen.</p>
         <div id="cRows" class="row" style="margin:10px 0 4px"></div>
         <button class="btn small ghost" onclick="addCRow()">+ Wert</button>
         <div class="row" style="margin-top:12px">
@@ -514,6 +514,7 @@ function renderDevices(){
   $('#devTable tbody').innerHTML=rows.map(d=>{
     const st=d.status; const on=st&&st[0]===1; const info=d.info||{};
     return `<tr>
+      <td><input type="checkbox" class="devCk" data-id="${d.id}" ${centralSel.has(d.id)?'checked':''} style="width:auto" onchange="toggleDevSel(${d.id},this.checked)"></td>
       <td><span class="dot ${on?'on':'off'}"></span>${fmtTime(st&&st[1])}</td>
       <td><b>${esc(d.name)}</b> ${authPill(d)}<br><span class="hint mono">${esc(d.ip)}</span></td>
       <td>${esc(info.model||'')} <span class="hint mono">${esc(info.target||'')}</span></td>
@@ -529,8 +530,14 @@ function renderDevices(){
         <button class="btn small danger" onclick="devReboot(${d.id},true)">⟳</button>
         <button class="btn small warn" onclick="if(confirm('Router entfernen?'))delDev(${d.id})">Löschen</button>
       </td></tr>`;
-  }).join('')||'<tr><td colspan="10" class="hint">Keine Router – „+ Router“ oben rechts.</td></tr>';
+  }).join('')||'<tr><td colspan="11" class="hint">Keine Router – „+ Router“ oben rechts.</td></tr>';
+  syncCkAll();
 }
+/* Auswahl für „Zentrale Konfiguration“ (Checkboxen in der Router-Tabelle) */
+const centralSel=new Set();
+function toggleDevSel(id,checked){ if(checked) centralSel.add(id); else centralSel.delete(id); syncCkAll(); }
+function toggleAllDev(on){ centralSel.clear(); if(on) devices.forEach(d=>centralSel.add(d.id)); renderDevices(); }
+function syncCkAll(){ const ck=$('#ckAll'); if(!ck) return; const n=devices.filter(d=>centralSel.has(d.id)).length; ck.checked=n>0&&n===devices.length; ck.indeterminate=n>0&&n<devices.length; }
 function authPill(d){
   let h='';
   if(d.auth_mode==='key') h+=' <span class="pill info">Key</span>';
@@ -801,9 +808,8 @@ async function cfgRestore(id){
   if(r.ok) alert('Wiederhergestellt ✓'); else alert('Fehler: '+await r.text());
 }
 
-/* ---------- central config (unchanged) ---------- */
+/* ---------- central config (Router-Auswahl = Checkboxen in der Router-Tabelle) ---------- */
 function renderCentralSelect(){
-  $('#cDev').innerHTML=devices.map(d=>`<option value="${d.id}">${esc(d.name)} (${esc(d.ip)})</option>`).join('');
   buildCRows();
 }
 function buildCRows(){
@@ -819,11 +825,11 @@ function buildCRows(){
 function addCRow(){ cRows.push(['','']); buildCRows(); }
 function rmCRow(i){ cRows.splice(i,1); if(!cRows.length)cRows=[[]]; buildCRows(); }
 async function applyCentral(){
-  const ids=[...$('#cDev').selectedOptions].map(o=>+o.value);
+  const ids=devices.filter(d=>centralSel.has(d.id)).map(d=>d.id);
   const assign=[...document.querySelectorAll('#cRows .ck')].map((el,i)=>({
     key:el.value.trim(), value:document.querySelectorAll('#cRows .cv')[i].value
   })).filter(a=>a.key);
-  if(!ids.length){alert('Mindestens einen Router auswählen');return;}
+  if(!ids.length){alert('Kein Router gewählt – Checkboxen in der Tabelle oben (Spalte ganz links)');return;}
   if(!assign.length){alert('Mindestens einen uci-Wert (z. B. wireless.radio0.ht / HT) angeben');return;}
   const r=await api('/api/central/apply',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({device_ids:ids,assignments:assign,
