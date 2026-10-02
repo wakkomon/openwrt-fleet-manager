@@ -422,7 +422,12 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
   </div>
 </div>
 
+<footer style="text-align:center;margin:24px 0 10px">
+  <span class="hint">OpenWRT Fleet Manager <span class="mono" id="appVer"></span></span>
+</footer>
+
 <script>
+const APP_VERSION="1.0.2";
 const $=s=>document.querySelector(s);
 let currentDev=null, devices=[], cRows=[[]], me=null;
 let sortKey='name', sortDir=1;
@@ -1139,6 +1144,7 @@ async function saveDeviceEdit(){
 }
 
 loadMe();
+$('#appVer').textContent='v'+APP_VERSION;
 showTab('dashboard');
 refreshAll();
 setInterval(refreshAll,30000);
