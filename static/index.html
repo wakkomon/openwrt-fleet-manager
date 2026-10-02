@@ -150,6 +150,7 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
           <th class="sortable" onclick="setSort('uptime')">Uptime <span class="arrow" id="ar-uptime"></span></th>
           <th class="sortable" onclick="setSort('load')">Auslastung (↓/↑) <span class="arrow" id="ar-load"></span></th>
           <th>Firmware</th>
+          <th class="sortable" onclick="setSort('pkgup')">Pakete <span class="arrow" id="ar-pkgup"></span></th>
           <th class="sortable" onclick="setSort('clients')">Endgeräte <span class="arrow" id="ar-clients"></span></th>
           <th style="width:300px">Aktionen</th>
         </tr></thead>
@@ -496,6 +497,7 @@ function sortVal(d,key){
   if(key==='uptime') return info.uptime_s||0;
   if(key==='load') return (info.rx_bps||0)+(info.tx_bps||0);
   if(key==='clients') return (d.clients?.lan||0)+(d.clients?.wlan||0);
+  if(key==='pkgup'){ const p=(d.info||{}).packages; return (p&&p.error)?-1:(p?p.count||0:-2); }
   return 0;
 }
 function setSort(key){
@@ -519,6 +521,7 @@ function renderDevices(){
       <td>${fmtUptime(info.uptime_s)}</td>
       <td class="mono">${info.rx_bps!=null?esc(fmtBps(info.rx_bps))+' / '+esc(fmtBps(info.tx_bps)):'—'}</td>
       <td>${fwPill(d)}</td>
+      <td>${pkgPill(d)}</td>
       <td>${d.clients.lan} LAN · ${d.clients.wlan} WLAN</td>
       <td class="row">
         <button class="btn small ghost" onclick="openDev(${d.id})">Details</button>
@@ -526,7 +529,7 @@ function renderDevices(){
         <button class="btn small danger" onclick="devReboot(${d.id},true)">⟳</button>
         <button class="btn small warn" onclick="if(confirm('Router entfernen?'))delDev(${d.id})">Löschen</button>
       </td></tr>`;
-  }).join('')||'<tr><td colspan="9" class="hint">Keine Router – „+ Router“ oben rechts.</td></tr>';
+  }).join('')||'<tr><td colspan="10" class="hint">Keine Router – „+ Router“ oben rechts.</td></tr>';
 }
 function authPill(d){
   let h='';
@@ -539,6 +542,13 @@ function fwPill(d){
   if(!f) return '<span class="pill cur">—</span>';
   if(f.has_update) return `<span class="pill upd">Update: ${esc(f.latest_version)}</span>`;
   return `<span class="pill cur">aktuell ${esc(f.latest_version||f.current_version)}</span>`;
+}
+function pkgPill(d){
+  const p=(d.info||{}).packages;
+  if(!p) return '<span class="pill cur">—</span>';
+  if(p.error) return `<span class="pill err" title="${esc(p.error)}">Fehler</span>`;
+  if(p.count) return `<span class="pill upd" title="${esc((p.packages||[]).join(', '))} · ${esc(p.pkgman||'')}">⬆ ${p.count} Update${p.count>1?'s':''}</span>`;
+  return `<span class="pill cur" title="${esc(p.pkgman||'')}">aktuell</span>`;
 }
 async function checkStatus(id){ await api(`/api/devices/${id}/status`,{method:'POST'}); refreshAll(); }
 async function delDev(id){ await api(`/api/devices/${id}`,{method:'DELETE'}); refreshAll(); }

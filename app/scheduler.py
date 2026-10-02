@@ -124,6 +124,12 @@ def survey_device(device_id: int) -> None:
     info["auto_name"] = host or current
     info["refreshed_at"] = __import__("datetime").datetime.now(
         __import__("datetime").timezone.utc).isoformat(timespec="seconds")
+    # Keys, die der Firmware/Paket-Check (alle 3 h) in device_info schreibt,
+    # muessen ueberleben: upsert_device_info ersetzt das komplette JSON,
+    # sonst verschwinden packages/pkg_restore bei jedem 5-min-Survey-Tick.
+    for keep in ("packages", "pkg_restore"):
+        if keep in prev_info:
+            info[keep] = prev_info[keep]
     db.upsert_device_info(device_id, json.dumps(info))
 
     db.add_snapshot(device_id, res.get("uptime_s", 0),
