@@ -338,6 +338,12 @@ class UciSet(BaseModel):
     value: str
 
 
+class PkgUpdateIn(BaseModel):
+    """Körper für POST /api/devices/{id}/packages/update.
+    names leer = alle upgradbaren Pakete, sonst nur die aufgeführten."""
+    names: list = []
+
+
 class CentralApply(BaseModel):
     device_ids: list[int]
     assignments: list[UciSet]
@@ -692,6 +698,79 @@ def api_firmware_wait(device_id: int, timeout_s: int = 300,
     db.upsert_online(device_id, ok)
     updater.finalize_manual(device_id, ok)
     return {"online": ok, "waited_s": int(time.time() - back)}
+
+
+# ------------------------------------------------------ package updates
+# "Paket-Updates durchführen" aus der Detailansicht: apk/opkg upgrade läuft
+# im Hintergrund-Thread (kann mehrere Minuten dauern), die UI pollt
+# /packages/update/status und zeigt die Live-Ausgabe im Log-Feld.
+PKG_RUNNING: set = set()
+_PKG_OUT: dict = {}
+
+
+def _pkg_worker(device_id: int, row: dict, job: int, names: list) -> None:
+    dev = scheduler.make_device(row)
+    _PKG_OUT[device_id] = ""
+
+    def emit(chunk: str) -> None:
+        _PKG_OUT[device_id] = (_PKG_OUT.get(device_id, "") + chunk)[-8000:]
+
+    try:
+        res = dev.update_packages(names or None, timeout=900,
+                                  on_output=emit)
+        if res.get("error"):
+            msg = "Paket-Update fehlgeschlagen: %s" % res["error"]
+            status = "error"
+        else:
+            msg = "Paket-Update abgeschlossen (rc=%s)" % res.get("rc")
+            status = "done"
+        db.finish_update_job(job, status, msg)
+        db.add_job(device_id, "packages-update",
+                   "ok" if status == "done" else "error", msg)
+        # frischen Paketstand in device_info (ohne neuen Index-Refresh)
+        try:
+            pkg = dev.package_check(refresh=False)
+            updater._store_pkg_state(device_id, pkg)
+        except Exception:  # pragma: no cover
+            pass
+    except Exception as exc:  # pragma: no cover
+        db.finish_update_job(job, "error",
+                             "Paket-Update fehlgeschlagen: %s" % str(exc)[:200])
+    finally:
+        PKG_RUNNING.discard(device_id)
+
+
+@app.post("/api/devices/{device_id}/packages/update")
+def api_pkg_update(device_id: int, body: PkgUpdateIn = PkgUpdateIn(),
+                   _u: dict = Depends(auth)):
+    row = _device_or_404(device_id)
+    if device_id in PKG_RUNNING:
+        raise HTTPException(409, "Paket-Update läuft bereits auf diesem Router")
+    dev = scheduler.make_device(row)
+    if not dev.is_online():
+        db.upsert_online(device_id, False)
+        raise HTTPException(502, "Router nicht erreichbar")
+    db.upsert_online(device_id, True)
+    names = [str(x).strip() for x in (body.names or []) if str(x).strip()]
+    n = len(names)
+    job = db.add_update_job(
+        device_id, row["name"], "running", "manual", "",
+        "Paket-Update: %s" % ("alle Pakete" if not n
+                              else "%d Pakete" % n))
+    db.add_job(device_id, "packages-update", "running",
+               "Paket-Update gestartet%s" % (
+                   ": %s" % ", ".join(names[:5]) if names else " (alle)"))
+    threading.Thread(target=_pkg_worker,
+                     args=(device_id, row, job, names),
+                     daemon=True).start()
+    PKG_RUNNING.add(device_id)
+    return {"started": True, "job": job, "packages": n}
+
+
+@app.get("/api/devices/{device_id}/packages/update/status")
+def api_pkg_update_status(device_id: int, _u: dict = Depends(auth)):
+    return {"running": device_id in PKG_RUNNING,
+            "output": _PKG_OUT.get(device_id, "")}
 
 
 # ------------------------------------------------------------- backups
