@@ -344,6 +344,13 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
           <button class="btn warn" onclick="fwUpgrade(currentDev,true)">⚠ Image-Test (sysupgrade -T)</button>
           <button class="btn ok" onclick="fwUpgrade(currentDev,false)">Firmware-Update durchführen</button>
         </div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn small" id="dPkgUpBtn" onclick="pkgUpdate(currentDev,false)">⬆ Paket-Updates durchführen</button>
+          <button class="btn small ghost" id="dPkgSelBtn" onclick="pkgUpdate(currentDev,true)">Nur ausgewählte</button>
+        </div>
+        <div id="dPkgSel" style="display:none;margin-top:8px"></div>
+        <div class="hint" style="margin-top:6px">Hinweis: Pakete wie <b>luci</b> brauchen nach dem Update einen Neustart der Router-UI; die Konfiguration bleibt erhalten.</div>
+        <div id="dPkgLog" style="margin-top:10px" class="log" hidden></div>
         <div id="dFwLog" style="margin-top:10px" class="log" hidden></div>
       </div>
       <div>
@@ -627,6 +634,8 @@ async function openDev(id){
   const d=devices.find(x=>x.id===id)||{name:'#'+id};
   $('#dTitle').textContent='Details: '+d.name;
   $('#dActMsg').textContent='';
+  $('#dPkgLog').hidden=true; $('#dPkgLog').textContent='';
+  $('#dPkgUpBtn').disabled=false;
   $('#dModal').style.display='block';
   renderDevInfoBar(id);
   // once per open: refresh info+clients from the router, then re-render (no re-open)
@@ -756,11 +765,55 @@ function renderFw(id){
     if(pr.pending) pkgline+=`<div class="hint" style="color:var(--info)"><b>Paket-Restore ausstehend:</b> ${esc(String((pr.names||[]).length))} Pakete vorgemerkt — werden nach dem Reboot automatisch nachinstalliert.</div>`;
     else pkgline+=`<div class="hint">Letzter Paket-Restore: ${esc(pr.status||'?')}${pr.result?' — '+esc(pr.result):''}</div>`;
   }
-  if(!f){$('#dFw').textContent='';$('#dFwDetail').innerHTML=pkgline;return;}
+  if(!f){$('#dFw').textContent='';$('#dFwDetail').innerHTML=pkgline;renderPkgSel(id);return;}
   $('#dFw').innerHTML=f.has_update
     ? `Installiert <b>${esc(f.current_version)}</b> → verfügbar <b>${esc(f.latest_version)}</b>`
-    : `Installiert <b>${esc(f.current_version)}</b> (aktuell)`;
+    : `Installiert <b>${f.current_version||'?'}</b> (aktuell)`;
   $('#dFwDetail').innerHTML=(f.url?('Image: '+esc(f.url)+'<br>'):'')+pkgline;
+  renderPkgSel(id);
+}
+function renderPkgSel(id){
+  const d=devices.find(x=>x.id===id);
+  const box=$('#dPkgSel'); const pk=(d&&d.info&&d.info.packages)||null;
+  const names=pk&&pk.packages?pk.packages.map(p=>String(p).split(' ')[0]):[];
+  if(!names.length){ box.style.display='none'; box.innerHTML=''; return; }
+  box.style.display='';
+  box.innerHTML=`<div class="hint">Ausgewählte Pakete aktualisieren:</div>`+
+    `<div class="row" style="flex-wrap:wrap;gap:6px">`+
+    names.map(n=>`<label style="margin:0;display:flex;align-items:center;gap:4px;cursor:pointer">
+      <input type="checkbox" class="pkgSel" value="${esc(n)}" style="width:auto" checked> ${esc(n)}</label>`).join('')+
+    `</div>`;
+}
+async function pkgUpdate(id,onlySelected){
+  const d=devices.find(x=>x.id===id);
+  const pk=(d&&d.info&&d.info.packages)||null;
+  let names=[];
+  if(onlySelected){
+    names=[...document.querySelectorAll('#dPkgSel .pkgSel:checked')].map(c=>c.value);
+    if(!names.length){ alert('Kein Paket ausgewählt.'); return; }
+  } else {
+    names=pk&&pk.packages?pk.packages.map(p=>String(p).split(' ')[0]):[];
+    if(!names.length){ alert('Keine Paket-Updates offen (letzter Check: '+(pk&&pk.checked_at?fmtTime(pk.checked_at):'—')+').'); return; }
+    if(!confirm(`Auf ${d?d.name:'Router'} alle ${names.length} Pakete aktualisieren? (kann mehrere Minuten dauern)`)) return;
+  }
+  const btn=$('#dPkgUpBtn'); btn.disabled=true;
+  const log=$('#dPkgLog'); log.hidden=false;
+  log.textContent=`Paket-Update gestartet (${names.length} Pakete) …\n`;
+  const r=await api(`/api/devices/${id}/packages/update`,{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({names})});
+  if(!r) return;
+  const t=setInterval(async()=>{
+    const s=await api(`/api/devices/${id}/packages/update/status`);
+    if(!s)return;
+    if(s.output) log.textContent=s.output+'\n';
+    if(!s.running){
+      clearInterval(t);
+      log.textContent+=`Fertig — Ansicht wird aktualisiert.\n`;
+      btn.disabled=false;
+      await refreshAll(); renderPkgSel(id);
+    }
+  },2000);
 }
 async function fwCheck(id){
   const r=await api(`/api/devices/${id}/firmware/check`,{method:'POST'});

@@ -123,6 +123,79 @@ class OpenWRT:
         return {"pkgman": pm, "count": len(pkgs), "packages": pkgs[:12],
                 "error": err}
 
+    def update_packages(self, names: list | None = None,
+                        timeout: int = 900, on_output=None) -> dict:
+        """Alle upgradbaren Pakete aktualisieren (apk upgrade / opkg upgrade).
+
+        Blockiert bis Ende (in einem Worker-Thread laufen lassen!).
+        `names` limitiert den Lauf auf ausgewählte Pakete (None = alles).
+        `on_output(chunk)` wird bei jedem empfangenen Stück gerufen, damit
+        die UI live mitlesen kann. Returns {"pkgman", "rc", "output",
+        "error"} — output ist der letzten Zeilen des Paketaustauschs.
+        """
+        rc, out, _ = self.run("which opkg apk 2>/dev/null", timeout=15)
+        managers = [w.strip().rsplit("/", 1)[-1] for w in out.split()
+                    if w.strip()]
+        pm = "apk" if "apk" in managers else (
+            "opkg" if "opkg" in managers else "")
+        if not pm:
+            return {"pkgman": "", "rc": 1, "output": "",
+                    "error": "kein Paketmanager gefunden"}
+        if pm == "apk":
+            target = " ".join(shlex.quote(n) for n in names) if names else ""
+            cmd = ("apk update >/dev/null 2>&1; "
+                   "apk upgrade" + (f" {target}" if target else "") +
+                   " 2>&1 | tail -40")
+        else:
+            if names:
+                quoted = " ".join(shlex.quote(n) for n in names)
+                cmd = ("opkg update 2>&1 | tail -1; "
+                       f"opkg upgrade {quoted} 2>&1 | tail -40")
+            else:
+                cmd = "opkg update 2>&1 | tail -1; opkg upgrade 2>&1 | tail -40"
+        client = self._client()
+        out_buf: list = []
+        try:
+            _, stdout, stderr = client.exec_command(cmd)
+            chan = stdout.channel
+            import time as _t
+            deadline = _t.time() + timeout
+            rc_code = 0
+            while True:
+                if stdout.channel.recv_ready():
+                    chunk = stdout.read(4096)
+                    out_buf.append(chunk)
+                    if on_output:
+                        try:
+                            on_output(chunk.decode("utf-8", "replace"))
+                        except Exception:
+                            pass
+                rc_code = chan.recv_exit_status()
+                if rc_code != -1:
+                    for data in (stdout.read(), stderr.read()):
+                        if data:
+                            out_buf.append(data)
+                            if on_output:
+                                try:
+                                    on_output(data.decode("utf-8", "replace"))
+                                except Exception:
+                                    pass
+                    break
+                if _t.time() > deadline:
+                    try:
+                        chan.close()
+                    except Exception:
+                        pass
+                    return {"pkgman": pm, "rc": 124,
+                            "output": "".join(out_buf)[:4000],
+                            "error": "Timeout nach %d s" % int(timeout)}
+                _t.sleep(1.5)
+            return {"pkgman": pm, "rc": rc_code,
+                    "output": "".join(out_buf)[:4000],
+                    "error": None if rc_code == 0 else "rc=%s" % rc_code}
+        finally:
+            client.close()
+
     # --------------------------------------- package set (sysupgrade backup)
     _WORLD_CMD = {
         "apk": "cat /etc/apk/world 2>/dev/null",
