@@ -370,8 +370,15 @@ class OpenWRT:
                 "opkg -info lldpd 2>/dev/null | awk -F': ' "
                 "'/Version:/{print $2; exit}'", timeout=15)
             ver = (ver or "").strip()
-            rc, out, err = self.run('timeout 12 lldpctl -f json 2>&1',
-                                    timeout=20)
+            # `timeout` fehlt teils auf BusyBox-ash — portable Fallback:
+            # Prozess im Hintergrund starten, nach 12 s killen.
+            rc, out, err = self.run(
+                'if command -v timeout >/dev/null 2>&1; then '
+                'timeout 12 lldpctl -f json 2>&1; '
+                'else (lldpctl -f json 2>&1 & P=$!; '
+                '(sleep 12; kill -9 $P 2>/dev/null) & K=$!; '
+                'wait $P 2>/dev/null; kill $K 2>/dev/null; true); fi',
+                timeout=25)
             ok = (rc == 0)
             if ok and not out.strip():
                 ok = False
@@ -469,7 +476,7 @@ class OpenWRT:
             '  lldpd 2>/dev/null && echo "retry ok"; }; '
             'enable lldpd 2>/dev/null; '
             'sleep 1; command -v lldpctl >/dev/null 2>&1 '
-            '&& timeout 8 lldpctl -f json 2>&1 | head -c 400',
+            '&& lldpctl -f json 2>&1 | head -c 400',
             timeout=180)
         ok = "lldpd started" in out or "retry ok" in out
         return {"ok": ok, "output": (out or _err or "").strip()[:800]}
