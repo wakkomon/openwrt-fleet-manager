@@ -356,6 +356,124 @@ class OpenWRT:
         return out.strip()
 
     # ------------------------------------------------------------- clients
+    def poll_lldp(self) -> dict:
+        """LLDP-Daten über lldpctl -f json (Schema: lldpd 1.0.x, display.c).
+
+        Liefert Status (lldpd läuft / installiert / fehlt), das lokale
+        Chassis (Name, MAC) und alle gesehenen Nachbarn. Fehler bei
+        „lldpd läuft nicht“ werden als sauberer Status zurückgegeben.
+        """
+        import socket
+        import ipaddress
+        try:
+            _, ver, _ = self.run(
+                "opkg -info lldpd 2>/dev/null | awk -F': ' "
+                "'/Version:/{print $2; exit}'", timeout=15)
+            ver = (ver or "").strip()
+            rc, out, err = self.run('timeout 12 lldpctl -f json 2>&1',
+                                    timeout=20)
+            ok = (rc == 0)
+            if ok and not out.strip():
+                ok = False
+        except Exception as exc:
+            return {"error": str(exc), "lldpd": "error",
+                    "installed": None, "version": None, "neighbors": []}
+        lldpd = "running" if ok else ("installed" if ver else "missing")
+        result = {"lldpd": lldpd, "version": ver or None,
+                  "error": None, "neighbors": [], "local": [],
+                  "local_chassis": None}
+        if not ok:
+            result["error"] = ((out or err) or "lldpd läuft nicht").strip()[:300]
+            return result
+        try:
+            data = json.loads(out)
+        except Exception as exc:
+            result["error"] = "lldpctl-JSON nicht parsebar: %s" % exc
+            return result
+        result["local_chassis"] = data.get("local-chassis")
+        result["local"] = data.get("local", []) or []
+        result["neighbors"] = self._parse_lldp_neighbors(data)
+        return result
+
+    def _parse_lldp_neighbors(self, data: dict) -> list:
+        """lldpctl-JSON → flache Neighbor-Liste.
+        Werte kommen je nach lldpd-Version als Objekt oder String daher
+        (json_writer.c: Einzelwert-Objekte kollabieren zu Plain-Values)."""
+        import socket
+        import ipaddress
+
+        def v(x, key):
+            if isinstance(x, dict):
+                val = x.get(key)
+                if isinstance(val, list):
+                    val = val[0] if val else None
+                if isinstance(val, dict):
+                    val = val.get("value", "")
+                return val or ""
+            return x if isinstance(x, str) else ("" if x is None else str(x))
+
+        def ip_of(lst):
+            for e in lst or []:
+                val = (e.get("value") or "") if isinstance(e, dict) else (e or "")
+                if val:
+                    try:
+                        ipaddress.ip_address(val)
+                        return val
+                    except ValueError:
+                        pass
+            return None
+
+        out = []
+        for e in data.get("lldp", []) or []:
+            via = e.get("via")
+            if not isinstance(via, dict):
+                continue
+            iface = v(e, "interface")
+            if not iface:
+                continue
+            ch = via.get("chassis") or {}
+            name = v(ch, "name") or ""
+            mips = ch.get("mgmt-ip") or []
+            mgmt = ip_of(mips)
+            host = None
+            if mgmt:
+                try:
+                    host = socket.gethostbyaddr(mgmt)[0]
+                except Exception:
+                    host = None
+            port = via.get("port") or {}
+            out.append({
+                "interface": iface,
+                "mac": v(via, "mac") or "",
+                "neighbor_name": name,
+                "neighbor_descr": v(ch, "descr") or "",
+                "chassis_id": v(ch, "id"),
+                "port_id": v(port, "id"),
+                "port_descr": v(port, "descr") or "",
+                "mgmt_ip": mgmt,
+                "hostname": host,
+                "status": v(e, "status"),
+            })
+        return out
+
+    def activate_lldp(self) -> dict:
+        """lldpd (ggf. nach Installation via apk add) starten.
+        Bleibt nach Reboot aktiv (initscript wird registriert)."""
+        _rc, out, _err = self.run(
+            'if ! command -v lldpctl >/dev/null 2>&1; then '
+            '  echo "INSTALLING"; apk add lldpd 2>&1 | tail -2; '
+            'else echo "PRESENT"; fi; '
+            'echo "---START---"; '
+            'lldpd 2>/dev/null && echo "lldpd started" || '
+            '{ echo "retry"; pkill lldpd 2>/dev/null; sleep 1; '
+            '  lldpd 2>/dev/null && echo "retry ok"; }; '
+            'enable lldpd 2>/dev/null; '
+            'sleep 1; command -v lldpctl >/dev/null 2>&1 '
+            '&& timeout 8 lldpctl -f json 2>&1 | head -c 400',
+            timeout=180)
+        ok = "lldpd started" in out or "retry ok" in out
+        return {"ok": ok, "output": (out or _err or "").strip()[:800]}
+
     def lan_clients(self) -> list:
         """Connected LAN devices from the ARP table (ip neigh), enriched
         with hostnames from the dnsmasq lease file when available."""

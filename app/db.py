@@ -65,6 +65,37 @@ def init_db() -> None:
                 iface TEXT NOT NULL DEFAULT ''
             );
 
+            CREATE TABLE IF NOT EXISTS lldp_local (
+                device_id INTEGER NOT NULL,
+                chassis_id TEXT NOT NULL DEFAULT '',
+                mac TEXT NOT NULL DEFAULT '',
+                name TEXT NOT NULL DEFAULT '',
+                descr TEXT NOT NULL DEFAULT '',
+                mgmt_ip TEXT NOT NULL DEFAULT '',
+                lldpd TEXT NOT NULL DEFAULT 'missing',
+                version TEXT NOT NULL DEFAULT '',
+                error TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (device_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS lldp_neighbors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id INTEGER NOT NULL,
+                iface TEXT NOT NULL DEFAULT '',
+                mac TEXT NOT NULL DEFAULT '',
+                chassis_id TEXT NOT NULL DEFAULT '',
+                port_id TEXT NOT NULL DEFAULT '',
+                neighbor_name TEXT NOT NULL DEFAULT '',
+                neighbor_descr TEXT NOT NULL DEFAULT '',
+                port_descr TEXT NOT NULL DEFAULT '',
+                mgmt_ip TEXT NOT NULL DEFAULT '',
+                hostname TEXT NOT NULL DEFAULT '',
+                seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (device_id, iface, chassis_id, port_id, mac)
+            );
+            CREATE INDEX IF NOT EXISTS idx_lldp_dev ON lldp_neighbors (device_id);
+
             CREATE TABLE IF NOT EXISTS firmware_state (
                 device_id INTEGER NOT NULL,
                 current_version TEXT NOT NULL DEFAULT '',
@@ -207,6 +238,8 @@ def remove_device(device_id: int) -> None:
         conn.execute("DELETE FROM device_info WHERE device_id=?", (device_id,))
         conn.execute("DELETE FROM online_status WHERE device_id=?", (device_id,))
         conn.execute("DELETE FROM clients WHERE device_id=?", (device_id,))
+        conn.execute("DELETE FROM lldp_local WHERE device_id=?", (device_id,))
+        conn.execute("DELETE FROM lldp_neighbors WHERE device_id=?", (device_id,))
         conn.execute("DELETE FROM firmware_state WHERE device_id=?", (device_id,))
         conn.execute("DELETE FROM update_jobs WHERE device_id=?", (device_id,))
         conn.commit()
@@ -293,6 +326,82 @@ def list_clients(device_id: int, kind: str) -> list:
         return [dict(r) for r in conn.execute(
             "SELECT * FROM clients WHERE device_id=? AND kind=? ORDER BY ip",
             (device_id, kind),
+        )]
+
+
+# ---------------------------------------------------------------------------
+# LLDP topology
+# ---------------------------------------------------------------------------
+
+def save_lldp(device_id: int, local: dict, neighbors: list) -> None:
+    """Persist one LLDP poll. `local` is the local-chassis dict from
+    `poll_lldp`; `neighbors` is its parsed neighbor list. Neighbors are
+    upserted (surviving entries are not dropped, so a transient empty
+    poll never erases the topology)."""
+    lc = local.get("local_chassis") or {}
+    def _g(x, key):
+        if isinstance(x, dict):
+            v = x.get(key)
+            if isinstance(v, list):
+                v = v[0] if v else None
+            if isinstance(v, dict):
+                v = v.get("value", "")
+            return v or ""
+        return x if isinstance(x, str) else ("" if x is None else str(x))
+    with _lock, _connect() as conn:
+        conn.execute(
+            "INSERT INTO lldp_local (device_id, chassis_id, mac, name, descr, "
+            "mgmt_ip, lldpd, version, error, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,datetime('now')) "
+            "ON CONFLICT(device_id) DO UPDATE SET "
+            "chassis_id=excluded.chassis_id, mac=excluded.mac, "
+            "name=excluded.name, descr=excluded.descr, "
+            "mgmt_ip=excluded.mgmt_ip, lldpd=excluded.lldpd, "
+            "version=excluded.version, error=excluded.error, "
+            "updated_at=excluded.updated_at",
+            (device_id, _g(lc, "id"), _g(lc, "mac"), _g(lc, "name"),
+             _g(lc, "descr"), _g(lc, "mgmt-ip"),
+             local.get("lldpd") or "", local.get("version") or "",
+             (local.get("error") or "")[:300]),
+        )
+        for n in neighbors:
+            conn.execute(
+                "INSERT INTO lldp_neighbors (device_id, iface, mac, chassis_id, "
+                "port_id, neighbor_name, neighbor_descr, port_descr, mgmt_ip, "
+                "hostname, seen_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now')) "
+                "ON CONFLICT(device_id, iface, chassis_id, port_id, mac) "
+                "DO UPDATE SET neighbor_name=excluded.neighbor_name, "
+                "neighbor_descr=excluded.neighbor_descr, "
+                "port_descr=excluded.port_descr, mgmt_ip=excluded.mgmt_ip, "
+                "hostname=excluded.hostname, seen_at=excluded.seen_at",
+                (device_id, n.get("interface") or "", n.get("mac") or "",
+                 n.get("chassis_id") or "", n.get("port_id") or "",
+                 n.get("neighbor_name") or "", n.get("neighbor_descr") or "",
+                 n.get("port_descr") or "", n.get("mgmt_ip") or "",
+                 n.get("hostname") or ""),
+            )
+        conn.commit()
+
+
+def lldp_local(device_id: int):
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM lldp_local WHERE device_id=?", (device_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def lldp_neighbors(device_id: int | None = None) -> list:
+    if device_id is None:
+        with _connect() as conn:
+            return [dict(r) for r in conn.execute(
+                "SELECT n.*, d.name AS device_name, d.ip AS device_ip "
+                "FROM lldp_neighbors n JOIN devices d ON d.id=n.device_id "
+                "ORDER BY d.name, n.iface")]
+    with _connect() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM lldp_neighbors WHERE device_id=? ORDER BY iface",
+            (device_id,),
         )]
 
 

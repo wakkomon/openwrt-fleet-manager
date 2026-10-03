@@ -72,6 +72,25 @@ canvas.chart { width:100%; height:220px; background:#0d1219; border:1px solid va
 tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8px 14px }
 .apitem { display:inline-block; background:#0d1219; border:1px solid var(--line); border-radius:7px;
           padding:2px 9px; margin:3px 6px 3px 0; font-size:12px }
+/* ---------- Topologie ---------- */
+.topo-wrap { display:grid; grid-template-columns:1fr 340px; gap:16px; align-items:start }
+@media (max-width:1100px){ .topo-wrap{grid-template-columns:1fr} }
+#topoCanvas { width:100%; min-height:560px; background:#0b0f15; border:1px solid var(--line);
+              border-radius:10px; display:block; cursor:grab; touch-action:none }
+#topoCanvas:active { cursor:grabbing }
+.topo-legend { display:flex; gap:14px; flex-wrap:wrap; margin-top:8px; font-size:12px; color:var(--dim) }
+.topo-legend span { display:inline-flex; align-items:center; gap:6px }
+.topo-legend i { width:12px; height:12px; border-radius:50%; display:inline-block }
+.lg-run { background:var(--ok) } .lg-inst { background:var(--warn) } .lg-miss { background:#5b6b7d }
+.lg-unk { background:#c98a2b } .lg-edge { background:var(--acc) }
+.lg-known { background:var(--acc) }
+.node-lbl { font:12px system-ui,sans-serif; fill:var(--tx); pointer-events:none; text-anchor:middle }
+.node-sub { font:10px ui-monospace,monospace; fill:var(--dim); pointer-events:none; text-anchor:middle }
+.node { cursor:pointer }
+.node text { user-select:none }
+.edge { stroke:var(--acc); stroke-width:1.6; opacity:.75; fill:none }
+.edge.unknown { stroke:#c98a2b; stroke-dasharray:4 3; opacity:.55 }
+.edge-lbl { font:10px ui-monospace,monospace; fill:var(--dim); text-anchor:middle; pointer-events:none }
 </style>
 </head>
 <body>
@@ -91,6 +110,7 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
     <button class="btn ghost small active" data-tab="dashboard" onclick="showTab('dashboard')">Dashboard</button>
     <button class="btn ghost small" data-tab="router" onclick="showTab('router')">Router</button>
     <button class="btn ghost small" data-tab="clients" onclick="showTab('clients')">Client-Suche</button>
+    <button class="btn ghost small" data-tab="topology" onclick="showTab('topology')">Topologie</button>
     <button class="btn ghost small" data-tab="updatejobs" onclick="showTab('updatejobs')">Update-Jobs</button>
     <button class="btn ghost small" data-tab="users" id="usersTab" onclick="showTab('users')" style="display:none">Benutzer</button>
   </div>
@@ -228,6 +248,38 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
       <table><thead><tr><th>Router</th><th>Typ</th><th>MAC</th><th>Hostname</th>
         <th>WLAN (SSID)</th><th>Kanal</th><th>Signal</th></tr></thead>
       <tbody id="aBody"></tbody></table>
+    </div>
+  </div>
+
+  <!-- ================= TOPOLOGY ================= -->
+  <div id="tab-topology" style="display:none">
+    <div class="card">
+      <h2>Netzwerk-Topologie (LLDP)</h2>
+      <div class="hint" style="margin-bottom:10px">
+        Verbindungen zwischen den Routern, erkannt über LLDP (<code>lldpctl</code>).
+        Automatisch alle 2 min. <b>↻ aktualisieren</b> pollt sofort neu.
+        <span class="row" style="margin-left:10px">
+          <button class="btn small ghost" onclick="loadTopology(true)">↻ aktualisieren</button>
+        </span>
+      </div>
+      <div class="topo-wrap">
+        <div>
+          <svg id="topoCanvas" viewBox="0 0 900 560" preserveAspectRatio="xMidYMid meet"></svg>
+          <div class="topo-legend">
+            <span><i class="lg-run"></i>lldpd läuft</span>
+            <span><i class="lg-inst"></i>lldpd installiert (läuft nicht)</span>
+            <span><i class="lg-miss"></i>lldpd fehlt</span>
+            <span><i class="lg-unk"></i>unbekannter Nachbar</span>
+            <span><i class="lg-known"></i>bekanntes Gerät</span>
+          </div>
+        </div>
+        <div>
+          <div class="card" id="topoDetail">
+            <h2>Gerät</h2>
+            <div class="hint">Klicke ein Gerät an, um Details und Verbindungen zu sehen.</div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -468,13 +520,14 @@ function fmtTime(t){ return t? String(t).replace('T',' ').slice(0,16): '—'; }
 
 /* ---------- tabs ---------- */
 function showTab(name){
-  ['dashboard','router','clients','updatejobs','users'].forEach(t=>{
+  ['dashboard','router','clients','topology','updatejobs','users'].forEach(t=>{
     $('#tab-'+t).style.display = (t===name)?'':'none';
   });
   document.querySelectorAll('.tabbar .btn').forEach(b=>
     b.classList.toggle('active', b.dataset.tab===name));
   if(name==='dashboard') loadDashboard();
   if(name==='clients') loadAllClients();
+  if(name==='topology') loadTopology();
   if(name==='updatejobs') refreshUpdateJobs();
   if(name==='users') loadUsers();
 }
@@ -1098,6 +1151,208 @@ function renderAllClients(){
     <td class="mono">${esc(c.signal||'')}</td></tr>`).join('')
     ||'<tr><td colspan="7" class="hint">Noch keine Clients erfasst – bitte einen Router scannen.</td></tr>';
 }
+
+/* ---------- topology (LLDP) ---------- */
+let _topoData=null, _topoSelected=null, _topoView={x:0,y:0,scale:1}, _topoDrag=null, _topoPan=null;
+const TOPO_W=900, TOPO_H=560;
+
+async function loadTopology(scanning){
+  if(scanning){ try{ await api('/api/topology'); }catch(e){} }
+  try{
+    const t=await api('/api/topology');
+    _topoData=(t&&t.devices)?t:{devices:[]};
+    drawTopology();
+  }catch(e){ console.error('topo',e); }
+}
+
+function topoColor(node){
+  if(node.lldpd==='running')   return {fill:'#12351f',stroke:'#2fbf71',text:'#7ee0a6'};
+  if(node.lldpd==='installed')return {fill:'#3a2f10',stroke:'#d99a1f',text:'#e7c265'};
+  if(node.lldpd==='missing')  return {fill:'#241c12',stroke:'#c98a2b',text:'#e2b06a'};
+  return {fill:'#1a212b',stroke:'#5b6b7d',text:'#9fb0c3'};
+}
+function lldpStatusBadge(s){
+  if(s==='running')return '<span class="pill cur">läuft</span>';
+  if(s==='installed')return '<span class="pill upd">installiert</span>';
+  if(s==='missing')return '<span class="pill err">fehlt</span>';
+  return '<span class="pill info">unbekannt</span>';
+}
+
+// Kreislayout: bekannte Geräte außen, unbekannte Nachbarn auf dem Ring zwischen den
+// verbundenen bekannten Geräten; isolierte bekannte Geräte gleichmäßig verteilt.
+function layoutTopology(devs){
+  const ids=devs.map(d=>d.device_id);
+  const knownSet=new Set(ids);
+  // Kanten zwischen bekannten Geräten sammeln
+  const edgeSet={}; // key a|b (a<b) -> {a,b,count}
+  const unknowns=[]; // {srcId, mac, name, port}
+  devs.forEach(d=>{
+    (d.neighbors||[]).forEach(n=>{
+      if(n.peer_device_id!=null){
+        const a=Math.min(d.device_id,n.peer_device_id), b=Math.max(d.device_id,n.peer_device_id);
+        if(a===b)return;
+        const key=a+'|'+b;
+        edgeSet[key]=edgeSet[key]||{a,b,count:0};
+        edgeSet[key].count++;
+      }else{
+        unknowns.push({srcId:d.device_id, mac:n.mac||'', name:n.neighbor_name||n.hostname||n.mgmt_ip||'unbekannt', port:n.local_port||''});
+      }
+    });
+  });
+  // Platzierung: bekannte Geräte auf einem Kreis, unbekannte zwischen ihren Anbindungen
+  const R=Math.min(TOPO_W,TOPO_H)/2-70, cx=TOPO_W/2, cy=TOPO_H/2;
+  const pos={}; // id -> {x,y}
+  const N=devs.length;
+  devs.forEach((d,i)=>{
+    const ang=(-Math.PI/2)+i*(2*Math.PI/Math.max(N,1));
+    pos[d.device_id]={x:cx+R*Math.cos(ang), y:cy+R*Math.sin(ang)};
+  });
+  // Unbekannte Geräte auf den Ring zwischen src und Mittelpunkt schieben (leicht außen)
+  unknowns.forEach(u=>{
+    const p=pos[u.srcId]; if(!p)return;
+    const dx=p.x-cx, dy=p.y-cy, len=Math.hypot(dx,dy)||1;
+    const off=46+ (u.name.length%3)*6; // leichte Variation
+    pos['u:'+u.srcId+':'+(u.mac||u.name)]={
+      x: cx+(dx/len)*(R*0.5+off), y: cy+(dy/len)*(R*0.5+off),
+      _unknown:true, srcId:u.srcId, mac:u.mac, name:u.name, port:u.port
+    };
+  });
+  // Kanten neu als Liste
+  const edges=Object.values(edgeSet).map(e=>({a:e.a,b:e.b,count:e.count}));
+  // unbekannte Kanten (src -> unknown node)
+  const uEdges=unknowns.map(u=>({a:u.srcId,b:'u:'+u.srcId+':'+(u.mac||u.name),unknown:true}));
+  return {pos, edges, uEdges};
+}
+
+function drawTopology(){
+  const svg=document.getElementById('topoCanvas');
+  if(!svg||!_topoData)return;
+  const devs=_topoData.devices||[];
+  if(!devs.length){ svg.innerHTML='<text x="450" y="280" text-anchor="middle" fill="#7f8ea0" font-size="15">Noch keine LLDP-Daten. Aktiviere lldpd auf einem Router (→ LLDp-Aktivieren) oder warte auf den nächsten Poll.</text>'; return; }
+  const {pos,edges,uEdges}=layoutTopology(devs);
+  const byId={}; devs.forEach(d=>byId[d.device_id]=d);
+  const v=_topoView;
+  let g='<g transform="translate('+v.x+','+v.y+') scale('+v.scale+')">';
+  // Kanten
+  edges.forEach(e=>{
+    const p=pos[e.a], q=pos[e.b]; if(!p||!q)return;
+    const midx=(p.x+q.x)/2, midy=(p.y+q.y)/2;
+    g+='<line class="edge" x1="'+p.x+'" y1="'+p.y+'" x2="'+q.x+'" y2="'+q.y+'"/>';
+    if(e.count>1)g+='<text class="edge-lbl" x="'+midx+'" y="'+(midy-4)+'">×'+e.count+'</text>';
+  });
+  uEdges.forEach(e=>{
+    const p=pos[e.a], q=pos[e.b]; if(!p||!q)return;
+    g+='<line class="edge unknown" x1="'+p.x+'" y1="'+p.y+'" x2="'+q.x+'" y2="'+q.y+'"/>';
+  });
+  // Unbekannte Geräte (kleine Punkte)
+  Object.values(pos).filter(p=>p._unknown).forEach(p=>{
+    const sel=_topoSelected==p.srcId;
+    g+='<g class="node" data-kind="unknown" data-id="'+p.srcId+'">'+
+       '<circle cx="'+p.x+'" cy="'+p.y+'" r="11" fill="#1a150c" stroke="#c98a2b" stroke-width="'+(sel?3:1.6)+'" stroke-dasharray="3 2"/>'+
+       '<text class="node-sub" x="'+p.x+'" y="'+(p.y+24)+'">'+esc(p.name.length>12?p.name.slice(0,12)+'…':p.name)+'</text>'+
+       '</g>';
+  });
+  // Bekannte Geräte
+  devs.forEach(d=>{
+    const p=pos[d.device_id]; if(!p)return;
+    const c=topoColor(d);
+    const sel=_topoSelected===d.device_id;
+    const on=(d.state==='online')?'1':'0';
+    g+='<g class="node" data-kind="device" data-id="'+d.device_id+'" onclick="selectTopoNode('+d.device_id+')">'+
+       '<circle cx="'+p.x+'" cy="'+p.y+'" r="20" fill="'+c.fill+'" stroke="'+c.stroke+'" stroke-width="'+(sel?4:2)+'"/>'+
+       (on?'<circle cx="'+(p.x+15)+'" cy="'+(p.y-15)+'" r="5" fill="#2fbf71"/>':'')+
+       (d.state==='offline'?'<circle cx="'+(p.x+15)+'" cy="'+(p.y-15)+'" r="5" fill="#7d4a4a"/>':'')+
+       '<text class="node-lbl" x="'+p.x+'" y="'+(p.y+34)+'">'+esc(d.name)+'</text>'+
+       '<text class="node-sub" x="'+p.x+'" y="'+(p.y+47)+'">'+esc(d.ip)+'</text>'+
+       '</g>';
+  });
+  g+='</g>';
+  svg.innerHTML=g;
+}
+
+async function selectTopoNode(id){
+  _topoSelected=id;
+  drawTopology();
+  const box=document.getElementById('topoDetail');
+  box.innerHTML='<div class="hint">Lade …</div>';
+  try{
+    const d=await api('/api/devices/'+id+'/lldp');
+    const st=lldpStatusBadge(d.lldpd);
+    let html='<h2>'+esc(d.name)+'</h2>';
+    html+='<div class="hint" style="margin:4px 0 8px"><span class="mono">'+esc(d.ip)+'</span> · '+st+(d.version?' · <span class="mono">'+esc(d.version)+'</span>':'')+'</div>';
+    if(d.error)html+='<div class="hint" style="color:#e08b8b">'+esc(d.error)+'</div>';
+    // lokale Daten
+    html+='<div class="hint" style="margin-top:6px"><b>Lokales Chassis</b></div>';
+    html+='<table class="list"><tbody>';
+    html+='<tr><td class="hint">MAC</td><td class="mono">'+esc(d.local.mac||'—')+'</td></tr>';
+    html+='<tr><td class="hint">Name</td><td>'+esc(d.local.name||d.local.descr||'—')+'</td></tr>';
+    html+='<tr><td class="hint">Mgmt-IP</td><td class="mono">'+esc(d.local.mgmt_ip||'—')+'</td></tr>';
+    html+='<tr><td class="hint">Aktualisiert</td><td>'+esc(d.local.updated_at||'—')+'</td></tr>';
+    html+='</tbody></table>';
+    // Nachbarn
+    const nb=d.neighbors||[];
+    html+='<div class="hint" style="margin-top:12px"><b>Verbindungen</b> ('+nb.length+')</div>';
+    if(!nb.length)html+='<div class="hint">Keine LLDP-Nachbarn.</div>';
+    else html+='<table class="list"><tbody>'+nb.map(n=>{
+      const known=n.is_known?'<span class="pill cur">bekannt</span>':'<span class="pill info">unbekannt</span>';
+      const face=n.local_port?('<span class="hint"> '+esc(n.local_port)+'</span>'):'';
+      return '<tr><td><b>'+esc(n.peer_name)+'</b> '+known+
+             (n.mgmt_ip?' <span class="hint mono">'+esc(n.mgmt_ip)+'</span>':'')+face+'</td></tr>';
+    }).join('')+'</tbody></table>';
+    // Aktionen
+    html+='<div class="row" style="margin-top:12px">';
+    html+='<button class="btn small ghost" onclick="lldpScan('+id+')">↻ neu pollen</button>';
+    if(d.lldpd!=='running')html+='<button class="btn small" style="margin-left:6px" onclick="activateLldp('+id+')">lldpd aktivieren</button>';
+    html+='</div>';
+    box.innerHTML=html;
+  }catch(e){ box.innerHTML='<div class="hint">Fehler: '+esc(e.message)+'</div>'; }
+}
+
+async function lldpScan(id){
+  const box=document.getElementById('topoDetail');
+  if(box)box.innerHTML='<div class="hint">Polle …</div>';
+  try{ await api('/api/devices/'+id+'/lldp/scan',{method:'POST'}); selectTopoNode(id); loadTopology(); }
+  catch(e){ if(box)box.innerHTML='<div class="hint">Fehler: '+esc(e.message)+'</div>'; }
+}
+
+async function activateLldp(id){
+  if(!confirm('lldpd auf diesem Gerät installieren/aktivieren (bleibt nach Reboot aktiv)?'))return;
+  const box=document.getElementById('topoDetail');
+  box.innerHTML='<div class="hint">Aktiviere lldpd …</div>';
+  try{
+    const r=await api('/api/devices/'+id+'/lldp/activate',{method:'POST'});
+    if(r&&r.ok)alert('lldpd aktiviert.');
+    else alert('Aktivierung fehlerhaft: '+(r&&r.output||''));
+    await loadTopology();
+    selectTopoNode(id);
+  }catch(e){ box.innerHTML='<div class="hint">Fehler: '+esc(e.message)+'</div>'; }
+}
+
+// Pan + Zoom
+(function(){
+  const svg=document.getElementById('topoCanvas');
+  if(!svg)return;
+  let pan=null, moved=false;
+  svg.addEventListener('mousedown',e=>{
+    if(e.target.closest('.node'))return;
+    pan={x:e.clientX,y:e.clientY,vx:_topoView.x,vy:_topoView.y};
+  });
+  window.addEventListener('mousemove',e=>{
+    if(!pan)return;
+    const s=svg.getBoundingClientRect();
+    const f=(s.width/TOPO_W); // viewBox-Skalierung
+    _topoView.x=pan.vx+(e.clientX-pan.x)/f;
+    _topoView.y=pan.vy+(e.clientY-pan.y)/f;
+    drawTopology();
+  });
+  window.addEventListener('mouseup',()=>{pan=null;});
+  svg.addEventListener('wheel',e=>{
+    e.preventDefault();
+    const d=Math.exp(-e.deltaY*0.0015);
+    _topoView.scale=Math.min(3,Math.max(0.4,_topoView.scale*d));
+    drawTopology();
+  },{passive:false});
+})();
 
 /* ---------- users ---------- */
 async function loadUsers(){
