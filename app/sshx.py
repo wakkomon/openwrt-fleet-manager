@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """SSH operations for OpenWRT routers (paramiko)."""
 import io
+import json
 import os
 import re
 import shlex
@@ -377,7 +378,7 @@ class OpenWRT:
                 'timeout 12 lldpctl -f json 2>&1; '
                 'else (lldpctl -f json 2>&1 & P=$!; '
                 '(sleep 12; kill -9 $P 2>/dev/null) & K=$!; '
-                'wait $P 2>/dev/null; kill $K 2>/dev/null; true); fi',
+                'wait $P; RC=$?; kill $K 2>/dev/null; exit $RC); fi',
                 timeout=25)
             ok = (rc == 0)
             if ok and not out.strip():
