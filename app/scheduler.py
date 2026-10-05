@@ -9,6 +9,7 @@ import json
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from . import db
+from .hp import HpSwitch
 from .sshx import OpenWRT
 
 
@@ -21,9 +22,24 @@ def make_device(row: dict) -> OpenWRT:
     )
 
 
+def make_hp(row: dict) -> HpSwitch:
+    """HP-1810/ProCurve-Switch (Web-Interface, kein SSH) bauen."""
+    port = row["port"] or 80
+    if port == 22:  # SSH-Default ist fuer HP sinnlos -> Web-Port
+        port = 80
+    return HpSwitch(row["name"], row["ip"], row["password"], port)
+
+
+def _is_hp(row: dict) -> bool:
+    return (row.get("kind") or "openwrt") == "hp1810"
+
+
 def check_status(device_id: int) -> None:
     row = db.get_device(device_id)
     if not row:
+        return
+    if _is_hp(row):
+        db.upsert_online(device_id, make_hp(row).is_online())
         return
     dev = make_device(row)
     online = dev.is_online()
@@ -33,6 +49,9 @@ def check_status(device_id: int) -> None:
 def scan_clients(device_id: int) -> None:
     row = db.get_device(device_id)
     if not row:
+        return
+    if _is_hp(row):
+        # Switch: keine ARP/WLAN-Clients; die Port-Belegung laeuft ueber die FDB
         return
     dev = make_device(row)
     if not dev.is_online():
@@ -62,31 +81,96 @@ def scan_clients(device_id: int) -> None:
         db.add_job(device_id, "scan", "error", str(exc))
 
 
+def _poll_hp(device_id: int, row: dict) -> None:
+    """HP-Switch ueber Web-Interface pollen: LLDP-Nachbarn + MAC-Tabelle
+    in die Topologie-/FDB-Struktur persistieren (kein SSH, kein lldpd)."""
+    sw = make_hp(row)
+    try:
+        data = sw.poll()
+    except Exception as exc:  # pragma: no cover
+        db.upsert_online(device_id, False)
+        db.add_job(device_id, "lldp", "error", str(exc))
+        return
+    errs = data.get("errors") or []
+    login_err = [e for e in errs if e.startswith("login:")]
+    db.upsert_online(device_id, not login_err)
+    fdb_rows, fdb_msg = [], "fdb: n/a"
+    if not any(e.startswith("mac_table:") for e in errs):
+        for m in data.get("mac_table") or []:
+            for p in m.get("ports") or []:
+                fdb_rows.append(("br0", p, "Port %d" % p, m.get("mac")))
+        db.save_fdb(device_id, fdb_rows)
+        fdb_msg = "%d MACs" % len(fdb_rows)
+    nb = [{
+        "interface": n.get("iface") or "",
+        "mac": n.get("mac") or "",
+        "chassis_id": n.get("chassis_id") or "",
+        "port_id": n.get("port_id") or "",
+        "neighbor_name": n.get("sys_name") or "",
+        "neighbor_descr": n.get("sys_desc") or "",
+        "port_descr": n.get("port_id") or "",
+        "mgmt_ip": n.get("mgmt_ip") or "",
+        "hostname": "",
+    } for n in (data.get("lldp_neighbors") or [])]
+    local = {
+        "local_chassis": {"id": row["name"], "name": row["name"], "mac": "",
+                          "descr": "HP 1810/ProCurve", "mgmt-ip": row["ip"]},
+        "lldpd": "hp-web", "version": "", "error": "; ".join(errs)[:300],
+    }
+    db.save_lldp(device_id, local, nb)
+    db.add_job(device_id, "lldp", "ok" if not login_err else "error",
+               "%d Nachbarn | %s" % (len(nb), fdb_msg))
+
+
 def poll_lldp(device_id: int) -> None:
     """LLDP-Poll: lldpctl -f json auf dem Router, Nachbarn + lokales Chassis
     in SQLite persistieren. Reverse-DNS (Hostname) erfolgt bereits in
     `poll_lldp` des sshx-Layers. Fehler werden als Job + Status vermerkt,
-    die gespeicherte Topologie bleibt dabei erhalten."""
+    die gespeicherte Topologie bleibt dabei erhalten.
+
+    Zusätzlich wird in derselben SSH-Verbindung die Bridge-FDB
+    (`brctl showmacs`) erfasst — sie liefert die L2-Adjazenz
+    ("wer hängt an welchem Port") und ist unabhängig von lldpd, daher auch
+    dann nützlich, wenn kein LLDP-Daemon läuft und 0 Nachbarn gemeldet
+    werden.
+    """
     row = db.get_device(device_id)
     if not row:
         return
+    if _is_hp(row):
+        _poll_hp(device_id, row)
+        return
     dev = make_device(row)
+    # Bridge-FDB zuerst (eigene, robuste Abfrage) — funktioniert auch,
+    # wenn lldpd fehlt; eigener Try, damit ein FDB-Fehler das LLDP nicht
+    # stört und umgekehrt.
+    try:
+        fdb_res = dev.poll_fdb()
+        fdb_rows = fdb_res.get("rows", [])
+        db.save_fdb(device_id, fdb_rows)
+        fdb_msg = "%d MACs" % len(fdb_rows)
+    except Exception as exc:  # pragma: no cover
+        fdb_msg = "fdb: %s" % exc
+
     try:
         res = dev.poll_lldp()
     except Exception as exc:  # pragma: no cover
         db.upsert_online(device_id, False)
-        db.add_job(device_id, "lldp", "error", str(exc))
+        db.add_job(device_id, "lldp", "error",
+                   "%s | %s" % (str(exc), fdb_msg))
         return
     if res.get("error") and not res.get("neighbors"):
         # lldpd fehlt/laeuft nicht — Status merken, nichts loeschen
         db.save_lldp(device_id, res, [])
         db.add_job(device_id, "lldp", "ok",
-                   "lldpd %s (%s)" % (res.get("lldpd"), res["error"][:60]))
+                   "lldpd %s (%s) | %s"
+                   % (res.get("lldpd"), res["error"][:60], fdb_msg))
         return
     db.upsert_online(device_id, True)
     db.save_lldp(device_id, res, res.get("neighbors", []))
     db.add_job(device_id, "lldp", "ok",
-               "%d Nachbarn" % len(res.get("neighbors", [])))
+               "%d Nachbarn | %s"
+               % (len(res.get("neighbors", [])), fdb_msg))
 
 
 def survey_device(device_id: int) -> None:
@@ -96,6 +180,8 @@ def survey_device(device_id: int) -> None:
     row = db.get_device(device_id)
     if not row:
         return
+    if _is_hp(row):
+        return  # Switch ohne SSH: Status/LLDP/FDB laufen ueber poll_lldp
     dev = make_device(row)
     try:
         res = dev.survey()
