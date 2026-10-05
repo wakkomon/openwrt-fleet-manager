@@ -376,6 +376,39 @@ def _job(device_id, kind, status, message):
         pass
 
 
+def _is_hp(row: dict) -> bool:
+    return (row.get("kind") or "openwrt") == "hp1810"
+
+
+def _ssh_only(row: dict) -> None:
+    """Endpunkte, die zwingend SSH brauchen, fuer den HP-1810-Switch sperren."""
+    if _is_hp(row):
+        raise HTTPException(
+            400,
+            "HP 1810: Dieser Switch wird per Web-Interface verwaltet – "
+            "SSH ist nicht verfuegbar.")
+
+
+def _hp_virtual_info(device_id: int, row: dict) -> dict:
+    """Info-Bar des Switches aus Web-Interface-Daten (LLDP/FDB) – ohne SSH."""
+    local = db.lldp_local(device_id) or {}
+    info = {
+        "kind": "hp1810",
+        "ip": row.get("ip") or "",
+        "model": local.get("name") or "HP 1810-24G",
+        "version": "Web-Interface (kein SSH)",
+        "lldp_neighbors": len(db.lldp_neighbors(device_id)),
+        "fdb_entries": len(db.fdb(device_id)),
+        "refreshed_at": local.get("updated_at") or "",
+        "no_ssh": True,
+    }
+    cur = db.get_device_info(device_id)
+    if isinstance(cur, dict) and cur.get("manual"):
+        info["manual"] = True   # manuellen Namen nicht verlieren
+    db.upsert_device_info(device_id, json.dumps(info))
+    return info
+
+
 # -------------------------------------------------------------------- boot
 
 
@@ -422,6 +455,7 @@ class DeviceIn(BaseModel):
     ssh_key: str = ""
     auth_mode: str = "password"
     auto_update: bool = False
+    kind: str = "openwrt"
 
 
 @app.post("/api/devices")
@@ -431,7 +465,7 @@ def api_device_add(d: DeviceIn, _u: dict = Depends(require_admin)):
     did = db.add_device(d.name, d.ip, d.port, d.user, d.password,
                         d.firmware_dir or "https://downloads.openwrt.org/releases",
                         ssh_key=d.ssh_key, auth_mode=d.auth_mode,
-                        auto_update=d.auto_update)
+                        auto_update=d.auto_update, kind=d.kind)
     return {"id": did}
 
 
@@ -473,6 +507,7 @@ class DevicePut(BaseModel):
     ssh_key: str | None = None
     auth_mode: str = "password"
     auto_update: bool = False
+    kind: str = "openwrt"
 
 
 @app.put("/api/devices/{device_id}")
@@ -484,7 +519,7 @@ def api_device_update(device_id: int, body: DevicePut,
     key = (row.get("ssh_key") or "") if body.ssh_key in (None, "", "********") else body.ssh_key
     db.update_device(device_id, body.name, body.ip, body.port, body.user, pw,
                      body.firmware_dir or "https://downloads.openwrt.org/releases",
-                     key, body.auth_mode, body.auto_update)
+                     key, body.auth_mode, body.auto_update, body.kind)
     _job(device_id, "device", "ok", "Zugangsdaten aktualisiert")
     return {"ok": True}
 
@@ -495,6 +530,12 @@ def api_device_update(device_id: int, body: DevicePut,
 @app.post("/api/devices/{device_id}/status")
 def api_device_status(device_id: int, _u: dict = Depends(auth)):
     row = _device_or_404(device_id)
+    if _is_hp(row):
+        online = scheduler.make_hp(row).is_online()
+        db.upsert_online(device_id, online)
+        _job(device_id, "status", "ok" if online else "down",
+             "online (Web-Interface)" if online else "Switch nicht erreichbar")
+        return {"online": online}
     dev = scheduler.make_device(row)
     online = dev.is_online()
     db.upsert_online(device_id, online)
@@ -506,6 +547,8 @@ def api_device_status(device_id: int, _u: dict = Depends(auth)):
 @app.post("/api/devices/{device_id}/info")
 def api_device_info(device_id: int, _u: dict = Depends(auth)):
     row = _device_or_404(device_id)
+    if _is_hp(row):
+        return _hp_virtual_info(device_id, row)
     dev = scheduler.make_device(row)
     try:
         info = dev.full_info()
@@ -522,6 +565,23 @@ def api_device_info(device_id: int, _u: dict = Depends(auth)):
 @app.post("/api/devices/{device_id}/clients")
 def api_scan_clients(device_id: int, _u: dict = Depends(auth)):
     row = _device_or_404(device_id)
+    if _is_hp(row):
+        # Switch ohne SSH: die MAC-Tabelle (FDB) ist die "Client"-Liste.
+        scheduler.poll_lldp(device_id)
+        label_map = _client_label_map()
+        lan = []
+        for r in db.fdb(device_id):
+            mac = (r.get("mac") or "").lower()
+            hm = label_map.get(mac) or ("", "", "")
+            lan.append({"ip": hm[1], "mac": mac,
+                        "hostname": hm[0] or (r.get("port_name") or ""),
+                        "iface": r.get("port_name") or ("Port %s" % r.get("port"))})
+        db.replace_clients(device_id, "lan",
+                           [(c["ip"], c["mac"], c["hostname"], c["iface"])
+                            for c in lan])
+        db.replace_clients(device_id, "wlan", [])
+        return {"lan": db.list_clients(device_id, "lan"),
+                "wlan": []}
     dev = scheduler.make_device(row)
     try:
         lan = dev.lan_clients()
@@ -624,6 +684,7 @@ def _stage_image_on_device(dev, url: str) -> dict:
 @app.post("/api/devices/{device_id}/firmware/check")
 def api_firmware_check(device_id: int, _u: dict = Depends(auth)):
     row = _device_or_404(device_id)
+    _ssh_only(row)
     dev = scheduler.make_device(row)
     try:
         res = dev.check_update()
@@ -644,6 +705,7 @@ def api_firmware_upgrade(device_id: int,
                          preserve_config: bool = True,
                          test_only: bool = False):
     row = _device_or_404(device_id)
+    _ssh_only(row)
     dev = scheduler.make_device(row)
     try:
         if not url:
@@ -693,6 +755,7 @@ def api_firmware_upgrade(device_id: int,
 def api_firmware_wait(device_id: int, timeout_s: int = 300,
                       _adm: dict = Depends(require_admin)):
     row = _device_or_404(device_id)
+    _ssh_only(row)
     dev = scheduler.make_device(row)
     back = time.time()
     ok = wait_for_reboot(dev, wait_s=15, poll=10, timeout=min(timeout_s, 240))
@@ -745,6 +808,7 @@ def _pkg_worker(device_id: int, row: dict, job: int, names: list) -> None:
 def api_pkg_update(device_id: int, body: PkgUpdateIn = PkgUpdateIn(),
                    _u: dict = Depends(auth)):
     row = _device_or_404(device_id)
+    _ssh_only(row)
     if device_id in PKG_RUNNING:
         raise HTTPException(409, "Paket-Update läuft bereits auf diesem Router")
     dev = scheduler.make_device(row)
@@ -781,6 +845,7 @@ def api_pkg_update_status(device_id: int, _u: dict = Depends(auth)):
 def api_config_backup(device_id: int, _u: dict = Depends(auth)):
     """Erstellt auf dem Router ein tar.gz von /etc/config und lädt es herunter."""
     row = _device_or_404(device_id)
+    _ssh_only(row)
     dev = scheduler.make_device(row)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     remote = f"/tmp/owfb-{ts}.tar.gz"
@@ -827,6 +892,7 @@ async def api_config_restore(device_id: int,
                              restart: bool = Form(False)):
     """Stellt ein vorheriges /etc/config tar.gz auf dem Router wieder her."""
     row = _device_or_404(device_id)
+    _ssh_only(row)
     dev = scheduler.make_device(row)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     remote = f"/tmp/owfr-{ts}.tar.gz"
@@ -863,6 +929,11 @@ def api_central_apply(req: CentralApply, _adm: dict = Depends(require_admin)):
         row = db.get_device(did)
         if not row:
             results.append({"device": did, "error": "not found"})
+            continue
+        if _is_hp(row):
+            # Switch ohne SSH: uci gibt es hier nicht
+            results.append({"device": did, "name": row["name"],
+                            "error": "HP 1810: kein SSH/uci – Gerät übersprungen"})
             continue
         dev = scheduler.make_device(row)
         entry = {"device": did, "name": row["name"]}
@@ -922,6 +993,10 @@ def api_update_jobs_run(device_id: int = 0,
                         _adm: dict = Depends(require_admin)):
     """Update-Pruefung (und ggf. Auto-Update) sofort im Hintergrund starten."""
     ids = [device_id] if device_id else [d["id"] for d in db.list_devices()]
+    if device_id:
+        _ssh_only(_device_or_404(device_id))
+    else:
+        ids = [i for i in ids if not _is_hp(db.get_device(i) or {})]
     _job(None, "update-check", "running", "sofortiger Update-Check (%d Router)" % len(ids))
     threading.Thread(target=updater.run_checks, args=(ids,), daemon=True).start()
     return {"started": True, "devices": len(ids)}
@@ -932,7 +1007,11 @@ def api_update_jobs_run(device_id: int = 0,
 
 @app.post("/api/devices/{device_id}/survey")
 def api_device_survey(device_id: int, _u: dict = Depends(auth)):
-    _device_or_404(device_id)
+    row = _device_or_404(device_id)
+    if (row.get("kind") or "openwrt") == "hp1810":
+        # Switch ohne SSH: kein Survey; LLDP/MAC-Tabelle laufen über poll_lldp
+        scheduler.poll_lldp(device_id)
+        return {"ok": True, "note": "HP Switch – Port-Belegung aktualisiert"}
     res = scheduler.survey_device(device_id)
     if res is None:
         raise HTTPException(502, "Router nicht erreichbar – bitte SSH-Daten prüfen")
@@ -942,6 +1021,8 @@ def api_device_survey(device_id: int, _u: dict = Depends(auth)):
 @app.post("/api/devices/{device_id}/reboot")
 def api_device_reboot(device_id: int, _adm: dict = Depends(require_admin)):
     row = _device_or_404(device_id)
+    if (row.get("kind") or "openwrt") == "hp1810":
+        raise HTTPException(400, "HP 1810: Reboot nicht über Web-Interface verfügbar")
     dev = scheduler.make_device(row)
     try:
         dev.reboot()
@@ -1139,6 +1220,7 @@ def _lldp_node(device_id: int, row: dict) -> dict:
             "updated_at": local.get("updated_at") or "",
         },
         "neighbors": neighbors,
+        "fdb": _fdb_view(device_id),
     }
 
 
@@ -1159,6 +1241,77 @@ def _client_mac_map() -> dict:
                 if mac not in m or (not m[mac][0] and host):
                     m[mac] = (host, ip)
     return m
+
+
+def _client_label_map() -> dict:
+    """MAC -> (hostname, ip, ssid) aus allen erfassten Clients (LAN + WLAN).
+
+    Wie ``_client_mac_map``, nimmt zusätzlich die SSID mit — für die
+    FDB-Belegung pro Port, damit WLAN-Stationen mit ihrem Netzwerk
+    beschriftet werden.
+    """
+    m = {}
+    for d in db.list_devices():
+        for kind in ("lan", "wlan"):
+            for c in db.list_clients(d["id"], kind):
+                mac = (c.get("mac") or "").lower()
+                if not mac:
+                    continue
+                host = (c.get("hostname") or "").strip()
+                ip = (c.get("ip") or "").strip()
+                ssid = (c.get("ssid") or "").strip()
+                if mac not in m or (not m[mac][0] and host):
+                    m[mac] = (host, ip, ssid)
+    return m
+
+
+def _fdb_view(device_id: int, label_map: dict | None = None) -> dict:
+    """Bridge-FDB als Port-Belegung pro Gerät für die Topologieansicht.
+
+    Gruppiert die gespeicherten FDB-Einträge nach Bridge und Port (Port-
+    Nummer aus brctl + Port-Name aus sysfs) und beschriftet jede MAC über
+    die Client-MAC-Tabelle (Hostname/IP/SSID) — so wird aus der nackten
+    MAC-Adresse „wer hängt an welchem Port“."""
+    rows = db.fdb(device_id)
+    if not rows:
+        return {"bridges": [], "updated_at": ""}
+    if label_map is None:
+        label_map = _client_label_map()
+    bridges: dict = {}
+    order: list = []
+    updated = ""
+    for r in rows:
+        br = r.get("bridge") or "br-lan"
+        if br not in bridges:
+            bridges[br] = {}
+            order.append(br)
+        bports = bridges[br]
+        key = (r.get("port"), r.get("port_name") or "")
+        if key not in bports:
+            bports[key] = []
+        mac = (r.get("mac") or "").lower()
+        hm = label_map.get(mac)
+        host = hm[0] if hm else ""
+        ip = hm[1] if hm else ""
+        ssid = hm[2] if hm else ""
+        bports[key].append({
+            "mac": mac,
+            "hostname": host,
+            "ip": ip,
+            "ssid": ssid,
+            "named": bool(host),
+        })
+        sa = r.get("seen_at") or ""
+        if sa > updated:
+            updated = sa
+    out_bridges = []
+    for br in order:
+        ports = []
+        for (port, pname) in sorted(bridges[br], key=lambda k: k[0]):
+            ports.append({"port": port, "port_name": pname,
+                          "clients": bridges[br][(port, pname)]})
+        out_bridges.append({"bridge": br, "ports": ports})
+    return {"bridges": out_bridges, "updated_at": updated}
 
 
 def _enrich_neighbors(nodes: list) -> list:
@@ -1228,6 +1381,10 @@ def api_lldp_scan(device_id: int, _u: dict = Depends(auth)):
 def api_lldp_activate(device_id: int, _u: dict = Depends(auth)):
     """lldpd auf dem Router (ggf. nach apk add) starten — bleibt nach Reboot aktiv."""
     row = _device_or_404(device_id)
+    if (row.get("kind") or "openwrt") == "hp1810":
+        # Switch meldet LLDP nativ; kein lldpd nötig
+        scheduler.poll_lldp(device_id)
+        return {"ok": True, "output": "HP 1810 – LLDP nativ aktiv, neu gepollt"}
     dev = scheduler.make_device(row)
     if not dev.is_online():
         raise HTTPException(502, "Router nicht erreichbar")
