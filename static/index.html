@@ -328,9 +328,15 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
         <div class="grid2">
           <div><label>Name</label><input id="eName"></div>
           <div><label>IP / Host</label><input id="eIp"></div>
-          <div><label>SSH-Port</label><input id="ePort"></div>
-          <div><label>SSH-User</label><input id="eUser"></div>
+          <div id="eSshPortDiv"><label>SSH-Port</label><input id="ePort"></div>
+          <div id="eSshUserDiv"><label>SSH-User</label><input id="eUser"></div>
         </div>
+        <label>Geräte-Typ</label>
+        <select id="eKind">
+          <option value="openwrt">OpenWRT-Router (SSH)</option>
+          <option value="hp1810">HP 1810 (Web-Interface)</option>
+        </select>
+        <div id="eSshCred">
         <label>SSH-Passwort (******** = behalten)</label><input id="ePass" type="password">
         <label>Login-Art</label>
         <select id="eMode" onchange="document.getElementById('eKeyRow').style.display=this.value==='key'?'':'none'">
@@ -339,6 +345,7 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
         <div id="eKeyRow" style="display:none">
           <label>Privater Schlüssel (******** = behalten; leer = keiner)</label>
           <textarea id="eKey" rows="5"></textarea>
+        </div>
         </div>
         <label>Firmware-Quelle</label><input id="eFwDir">
         <label style="display:flex;align-items:center;gap:6px;margin-top:8px"><input type="checkbox" id="eAuto" style="width:auto"> Automatische Firmware-Updates erlauben</label>
@@ -351,8 +358,14 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
     <div class="row" style="margin-bottom:14px">
       <button class="btn small" onclick="devSurvey(currentDev)">↻ Jetzt scannen</button>
       <button class="btn small ghost" onclick="devRename(currentDev)">✎ Umbenennen</button>
-      <button class="btn small danger" onclick="devReboot(currentDev)">⟳ Router neu starten</button>
+      <button class="btn small danger" id="dRebootBtn" onclick="devReboot(currentDev)">⟳ Router neu starten</button>
       <span class="hint" id="dActMsg"></span>
+    </div>
+    <div id="dHpNote" class="hint" style="display:none;margin:-6px 0 12px">
+      HP 1810: <b>kein SSH-Zugriff</b> – Verwaltung über das Web-Interface.
+      Reboot, Firmware-/Paket-Updates und Konfigurations-Backups sind für diesen
+      Switch nicht verfügbar; Status, LLDP-Nachbarn und MAC-Tabelle werden über
+      das Web-Interface ermittelt.
     </div>
 
     <div class="card" style="margin:0 0 14px">
@@ -368,20 +381,20 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
       <canvas class="chart" id="chartClients" height="160"></canvas>
     </div>
 
-    <div class="grid2">
+    <div class="grid2" id="dClientCols" style="margin-top:14px">
       <div>
         <h2>LAN-Geräte <span class="badge" id="dLanN"></span></h2>
         <table><thead><tr><th>IP</th><th>MAC</th><th>Name</th><th>IF</th></tr></thead>
         <tbody id="dLan"></tbody></table>
       </div>
-      <div>
+      <div id="dWlanCol">
         <h2>WLAN-Stationen <span class="badge" id="dWlanN"></span></h2>
         <table><thead><tr><th>IP</th><th>MAC</th><th>Name</th><th>Signal</th></tr></thead>
         <tbody id="dWlan"></tbody></table>
       </div>
     </div>
 
-    <div class="grid2" style="margin-top:14px">
+    <div class="grid2" id="dSshCols" style="margin-top:14px">
       <div>
         <h2>Firmware</h2>
         <div class="row">
@@ -431,6 +444,12 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
     <h2>Neuen Router hinzufügen</h2>
     <label>Name</label><input id="aName" placeholder="z. B. Archer C7 (WG)">
     <label>IP / Host</label><input id="aIp" placeholder="192.168.1.94">
+    <label>Geräte-Typ</label>
+    <select id="aKind" onchange="document.getElementById('aKindHint').style.display=this.value==='hp1810'?'':'none'">
+      <option value="openwrt">OpenWRT-Router (SSH)</option>
+      <option value="hp1810">HP 1810 (Web-Interface)</option>
+    </select>
+    <div id="aKindHint" style="display:none" class="hint">HP 1810-24G: LLDP/MAC-Tabelle per Web-Interface, kein SSH/Reboot.</div>
     <div class="grid2">
       <div><label>SSH-Port</label><input id="aPort" value="22"></div>
       <div><label>SSH-User</label><input id="aUser" value="root"></div>
@@ -578,21 +597,22 @@ function renderDevices(){
   });
   $('#devTable tbody').innerHTML=rows.map(d=>{
     const st=d.status; const on=st&&st[0]===1; const info=d.info||{};
+    const hp=d.kind==='hp1810';
     return `<tr>
-      <td><input type="checkbox" class="devCk" data-id="${d.id}" ${centralSel.has(d.id)?'checked':''} style="width:auto" onchange="toggleDevSel(${d.id},this.checked)"></td>
+      <td>${hp?'<span class="hint">—</span>':`<input type="checkbox" class="devCk" data-id="${d.id}" ${centralSel.has(d.id)?'checked':''} style="width:auto" onchange="toggleDevSel(${d.id},this.checked)">`}</td>
       <td><span class="dot ${on?'on':'off'}"></span>${fmtTime(st&&st[1])}</td>
-      <td><b>${esc(d.name)}</b> ${authPill(d)}<br><span class="hint mono">${esc(d.ip)}</span></td>
+      <td><b>${esc(d.name)}</b> ${authPill(d)}${hp?' <span class="pill info" title="kein SSH – Web-Interface">Web</span>':''}<br><span class="hint mono">${esc(d.ip)}</span></td>
       <td>${esc(info.model||'')} <span class="hint mono">${esc(info.target||'')}</span></td>
       <td class="mono">${esc(info.version||'—')}</td>
-      <td>${fmtUptime(info.uptime_s)}</td>
+      <td>${hp?'—':fmtUptime(info.uptime_s)}</td>
       <td class="mono">${info.rx_bps!=null?esc(fmtBps(info.rx_bps))+' / '+esc(fmtBps(info.tx_bps)):'—'}</td>
-      <td>${fwPill(d)}</td>
-      <td>${pkgPill(d)}</td>
-      <td>${d.clients.lan} LAN · ${d.clients.wlan} WLAN</td>
+      <td>${hp?'—':fwPill(d)}</td>
+      <td>${hp?'—':pkgPill(d)}</td>
+      <td>${d.clients.lan} LAN${hp?'':' · '+d.clients.wlan+' WLAN'}</td>
       <td class="row">
         <button class="btn small ghost" onclick="openDev(${d.id})">Details</button>
         <button class="btn small ghost" onclick="checkStatus(${d.id})">Status</button>
-        <button class="btn small danger" onclick="devReboot(${d.id},true)">⟳</button>
+        ${hp?'':`<button class="btn small danger" onclick="devReboot(${d.id},true)">⟳</button>`}
         <button class="btn small warn" onclick="if(confirm('Router entfernen?'))delDev(${d.id})">Löschen</button>
       </td></tr>`;
   }).join('')||'<tr><td colspan="11" class="hint">Keine Router – „+ Router“ oben rechts.</td></tr>';
@@ -601,8 +621,8 @@ function renderDevices(){
 /* Auswahl für „Zentrale Konfiguration“ (Checkboxen in der Router-Tabelle) */
 const centralSel=new Set();
 function toggleDevSel(id,checked){ if(checked) centralSel.add(id); else centralSel.delete(id); syncCkAll(); }
-function toggleAllDev(on){ centralSel.clear(); if(on) devices.forEach(d=>centralSel.add(d.id)); renderDevices(); }
-function syncCkAll(){ const ck=$('#ckAll'); if(!ck) return; const n=devices.filter(d=>centralSel.has(d.id)).length; ck.checked=n>0&&n===devices.length; ck.indeterminate=n>0&&n<devices.length; }
+function toggleAllDev(on){ centralSel.clear(); if(on) devices.forEach(d=>{ if(d.kind!=='hp1810') centralSel.add(d.id); }); renderDevices(); }
+function syncCkAll(){ const ck=$('#ckAll'); if(!ck) return; const sel=devices.filter(d=>d.kind!=='hp1810'); const n=sel.filter(d=>centralSel.has(d.id)).length; ck.checked=n>0&&n===sel.length; ck.indeterminate=n>0&&n<sel.length; }
 function authPill(d){
   let h='';
   if(d.auth_mode==='key') h+=' <span class="pill info">Key</span>';
@@ -627,12 +647,14 @@ async function delDev(id){ await api(`/api/devices/${id}`,{method:'DELETE'}); re
 
 /* ---------- add device / bulk ---------- */
 function showAddDevice(){$('#aModal').style.display='block';
+  if($('#aKind')){$('#aKind').value='openwrt';$('#aKindHint').style.display='none';}
   if($('#aMode')){$('#aMode').value='password';$('#aKeyRow').style.display='none';$('#aAuto').checked=false;}}
 function hideAddDevice(){$('#aModal').style.display='none';}
 async function addDevice(){
   const body={name:$('#aName').value.trim(),ip:$('#aIp').value.trim(),
     port:parseInt($('#aPort').value)||22,user:$('#aUser').value.trim()||'root',
     password:$('#aPass').value,firmware_dir:$('#aFwDir').value.trim(),
+    kind:$('#aKind')?$('#aKind').value:'openwrt',
     ssh_key:$('#aKey')?$('#aKey').value:'',auth_mode:$('#aMode').value,
     auto_update:!!($('#aAuto')&&$('#aAuto').checked)};
   if(!body.name||!body.ip){alert('Name und IP erforderlich');return;}
@@ -685,10 +707,16 @@ let detailOpen=false, pendingRefresh=null;
 async function openDev(id){
   currentDev=id; detailOpen=true;
   const d=devices.find(x=>x.id===id)||{name:'#'+id};
+  const hp=d.kind==='hp1810';
   $('#dTitle').textContent='Details: '+d.name;
   $('#dActMsg').textContent='';
   $('#dPkgLog').hidden=true; $('#dPkgLog').textContent='';
   $('#dPkgUpBtn').disabled=false;
+  $('#dHpNote').style.display=hp?'':'none';
+  $('#dRebootBtn').style.display=hp?'none':'';
+  $('#dSshCols').style.display=hp?'none':'';
+  $('#dWlanCol').style.display=hp?'none':'';
+  $('#dClientCols').querySelector('h2').textContent=hp?'Geräte an Ports (MAC-Tabelle)':'LAN-Geräte';
   $('#dModal').style.display='block';
   renderDevInfoBar(id);
   // once per open: refresh info+clients from the router, then re-render (no re-open)
@@ -708,17 +736,25 @@ function closeDev(){ $('#dModal').style.display='none'; currentDev=null; detailO
 function renderDevInfoBar(id){
   const d=devices.find(x=>x.id===id)||{}; const info=d.info||{};
   $('#dTitle').textContent='Details: '+(d.name||('#'+id));
+  const extra=[];
+  if(d.kind==='hp1810'){
+    extra.push(['Verwaltung','Web-Interface · kein SSH']);
+    if(info.lldp_neighbors!=null) extra.push(['LLDP-Nachbarn',info.lldp_neighbors]);
+    if(info.fdb_entries!=null) extra.push(['MAC-Tabelle',info.fdb_entries]);
+  }
   $('#dInfo').innerHTML=[
     ['IP',info.ip||d.ip],['Modell/Board',info.model||''],['OpenWrt',info.version||''],
     ['Ziel',info.target||''],['Arch',info.arch||''],['Uptime',fmtUptime(info.uptime_s)],
     ['Last ↓/↑',(info.rx_bps!=null?fmtBps(info.rx_bps)+' / '+fmtBps(info.tx_bps):'')],
     ['Stand',fmtTime(info.refreshed_at)]]
+    .concat(extra)
     .filter(([,v])=>v).map(([k,v])=>`<span class="badge">${esc(k)}: <b>${esc(v)}</b></span>`).join(' ');
 }
 async function devSurvey(id){
   $('#dActMsg').textContent='Scan läuft …';
   const r=await api(`/api/devices/${id}/survey`,{method:'POST'});
-  $('#dActMsg').textContent=r?('Scan fertig um '+new Date().toLocaleTimeString('de-DE')+' · '
+  if(r&&r.note) $('#dActMsg').textContent=r.note+' ('+new Date().toLocaleTimeString('de-DE')+')';
+  else $('#dActMsg').textContent=r?('Scan fertig um '+new Date().toLocaleTimeString('de-DE')+' · '
     +((r.clients||[]).length)+' WLAN, '+Object.keys(r.leases||{}).length+' Lease'):'Scan fehlgeschlagen';
   await refreshAll();
   renderClients(id); renderFw(id); loadHistory(id); renderDevInfoBar(id);
@@ -1299,6 +1335,32 @@ async function selectTopoNode(id){
       return '<tr><td><b>'+esc(n.peer_name)+'</b> '+known+
              (n.mgmt_ip?' <span class="hint mono">'+esc(n.mgmt_ip)+'</span>':'')+face+'</td></tr>';
     }).join('')+'</tbody></table>';
+    // Bridge-FDB: Port-Belegung (L2-Adjazenz, unabhängig von LLDP)
+    const fdb=d.fdb||{bridges:[]};
+    const fdbBridges=fdb.bridges||[];
+    let fdbTotal=0;
+    fdbBridges.forEach(b=>(b.ports||[]).forEach(p=>fdbTotal+= (p.clients||[]).length));
+    if(fdbBridges.length||nb.length){
+      html+='<div class="hint" style="margin-top:12px"><b>Port-Belegung (Bridge-FDB)</b> ('+fdbTotal+' MACs)</div>';
+      if(!fdbBridges.length){
+        html+='<div class="hint">Noch keine FDB-Daten — erscheint ab dem nächsten LLDP-Poll (2 Min).</div>';
+      }else{
+        fdbBridges.forEach(b=>{
+          html+='<div class="hint" style="margin-top:8px"><span class="mono">'+esc(b.bridge)+'</span></div>';
+          html+='<table class="list"><tbody>'+ (b.ports||[]).map(p=>{
+            const c=p.clients||[];
+            const label=c.map(cl=>{
+              const nm=cl.hostname||cl.ip||cl.ssid||cl.mac;
+              return esc(nm);
+            }).join(', ');
+            return '<tr><td><b>'+esc(p.port_name||('Port '+p.port))+'</b>'
+                 + (p.port?(' <span class="hint mono">p'+p.port+'</span>'):'')
+                 + ' <span class="hint">('+c.length+')</span></td>'
+                 + '<td class="hint">'+(label||'—')+'</td></tr>';
+          }).join('')+'</tbody></table>';
+        });
+      }
+    }
     // Aktionen
     html+='<div class="row" style="margin-top:12px">';
     html+='<button class="btn small ghost" onclick="lldpScan('+id+')">↻ neu pollen</button>';
@@ -1433,16 +1495,34 @@ function toggleEditAccess(){
     $('#eName').value=d.name||''; $('#eIp').value=d.ip||'';
     $('#ePort').value=d.port||22; $('#eUser').value=d.user||'root';
     $('#ePass').value=d.password||''; $('#eMode').value=d.auth_mode||'password';
+    if($('#eKind')) $('#eKind').value=d.kind||'openwrt';
     $('#eKey').value=d.ssh_key||''; $('#eKeyRow').style.display=(d.auth_mode==='key')?'':'none';
     $('#eFwDir').value=d.firmware_dir||'https://downloads.openwrt.org/releases';
     $('#eAuto').checked=!!d.auto_update;
+    applyKindToEdit();
+    $('#eKind').onchange=applyKindToEdit;
   }
+}
+function applyKindToEdit(){
+  const hp=$('#eKind').value==='hp1810';
+  const show=(id,v)=>{const e=$(id); if(e) e.style.display=v?'':'none';};
+  show('#eSshPortDiv',!hp); show('#eSshUserDiv',!hp); show('#eSshCred',!hp);
+  if(hp){ $('#eMode').value='password'; $('#eKeyRow').style.display='none'; }
+  let h=$('#ePassHint');
+  if(hp&&!h){
+    h=document.createElement('div'); h.id='ePassHint'; h.className='hint';
+    h.style.margin='2px 0 8px';
+    h.innerHTML='HP 1810: <b>kein SSH</b> – Zugriff ausschließlich über das '
+      +'Web-Interface (Port 80). LLDP, MAC-Tabelle und Status kommen von dort.';
+    $('#eKind').after(h);
+  } else if(!hp&&h){ h.remove(); }
 }
 async function saveDeviceEdit(){
   const d=devices.find(x=>x.id===currentDev)||{};
   const body={name:$('#eName').value.trim(),ip:$('#eIp').value.trim(),
     port:parseInt($('#ePort').value)||22,user:$('#eUser').value.trim()||'root',
     password:$('#ePass').value,ssh_key:$('#eKey').value,
+    kind:$('#eKind')?$('#eKind').value:'openwrt',
     auth_mode:$('#eMode').value,firmware_dir:$('#eFwDir').value.trim(),
     auto_update:$('#eAuto').checked};
   if(!body.name||!body.ip){alert('Name und IP erforderlich');return;}

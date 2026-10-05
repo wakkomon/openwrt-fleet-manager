@@ -38,6 +38,7 @@ def init_db() -> None:
                 auth_mode TEXT NOT NULL DEFAULT 'password',
                 ssh_key TEXT,
                 auto_update INTEGER NOT NULL DEFAULT 0,
+                kind TEXT NOT NULL DEFAULT 'openwrt',
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
@@ -95,6 +96,18 @@ def init_db() -> None:
                 UNIQUE (device_id, iface, chassis_id, port_id, mac)
             );
             CREATE INDEX IF NOT EXISTS idx_lldp_dev ON lldp_neighbors (device_id);
+
+            CREATE TABLE IF NOT EXISTS bridge_fdb (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id INTEGER NOT NULL,
+                bridge TEXT NOT NULL DEFAULT '',
+                port INTEGER NOT NULL DEFAULT 0,
+                port_name TEXT NOT NULL DEFAULT '',
+                mac TEXT NOT NULL DEFAULT '',
+                seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (device_id, bridge, port, mac)
+            );
+            CREATE INDEX IF NOT EXISTS idx_fdb_dev ON bridge_fdb (device_id);
 
             CREATE TABLE IF NOT EXISTS firmware_state (
                 device_id INTEGER NOT NULL,
@@ -161,6 +174,7 @@ def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
+
             CREATE TABLE IF NOT EXISTS update_jobs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 device_id INTEGER NOT NULL,
@@ -184,12 +198,19 @@ def init_db() -> None:
         # migration: SSH-Key-Login + Auto-Update columns (older DBs)
         for _col, _ddl in (("auth_mode", "TEXT NOT NULL DEFAULT 'password'"),
                            ("ssh_key", "TEXT"),
-                           ("auto_update", "INTEGER NOT NULL DEFAULT 0")):
+                           ("auto_update", "INTEGER NOT NULL DEFAULT 0"),
+                           ("kind", "TEXT NOT NULL DEFAULT 'openwrt'")):
             try:
                 conn.execute("ALTER TABLE devices ADD COLUMN %s %s" % (_col, _ddl))
                 conn.commit()
             except sqlite3.OperationalError:
                 pass
+        # migration: spezialisierter HP-Typ (frueher "hp", jetzt "hp1810")
+        try:
+            conn.execute("UPDATE devices SET kind='hp1810' WHERE kind='hp'")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
 
 
@@ -203,13 +224,14 @@ def get_db() -> sqlite3.Connection:
 
 def add_device(name: str, ip: str, port: int, user: str, password: str,
                firmware_dir: str, ssh_key: str = "", auth_mode: str = "password",
-               auto_update: bool = False) -> int:
+               auto_update: bool = False, kind: str = "openwrt") -> int:
     with _lock, _connect() as conn:
         cur = conn.execute(
             "INSERT INTO devices (name, ip, port, user, password, firmware_dir, "
-            "ssh_key, auth_mode, auto_update) VALUES (?,?,?,?,?,?,?,?,?)",
+            "ssh_key, auth_mode, auto_update, kind) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (name, ip, port, user, password, firmware_dir,
-             ssh_key or None, auth_mode or "password", 1 if auto_update else 0),
+             ssh_key or None, auth_mode or "password", 1 if auto_update else 0,
+             kind or "openwrt"),
         )
         conn.commit()
         return int(cur.lastrowid)
@@ -401,6 +423,34 @@ def lldp_neighbors(device_id: int | None = None) -> list:
     with _connect() as conn:
         return [dict(r) for r in conn.execute(
             "SELECT * FROM lldp_neighbors WHERE device_id=? ORDER BY iface",
+            (device_id,),
+        )]
+
+
+def save_fdb(device_id: int, rows: list) -> None:
+    """Persist a bridge-FDB poll. `rows`: (bridge, port, port_name, mac).
+
+    Snapshot-replace per device: the whole device FDB is dropped and
+    re-inserted so stale (aged-out) entries vanish. A brand-new empty
+    result (e.g. first poll) is still written so the device is marked
+    as polled. Port numbering follows brctl (decimal) and port_name is
+    resolved on the host side from sysfs, so it is stable across polls.
+    """
+    with _lock, _connect() as conn:
+        conn.execute("DELETE FROM bridge_fdb WHERE device_id=?", (device_id,))
+        if rows:
+            conn.executemany(
+                "INSERT INTO bridge_fdb (device_id, bridge, port, port_name, mac, "
+                "seen_at) VALUES (?,?,?,?,?,datetime('now'))",
+                [(device_id, b, p, pn, m) for (b, p, pn, m) in rows],
+            )
+        conn.commit()
+
+
+def fdb(device_id: int) -> list:
+    with _connect() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM bridge_fdb WHERE device_id=? ORDER BY bridge, port, mac",
             (device_id,),
         )]
 
@@ -615,14 +665,16 @@ def list_jobs(limit: int = 100) -> list:
 
 def update_device(device_id: int, name: str, ip: str, port: int, user: str,
                   password: str, firmware_dir: str, ssh_key: str = "",
-                  auth_mode: str = "password", auto_update: bool = False) -> None:
+                  auth_mode: str = "password", auto_update: bool = False,
+                  kind: str = "openwrt") -> None:
     with _lock, _connect() as conn:
         conn.execute(
             "UPDATE devices SET name=?, ip=?, port=?, user=?, password=?, "
-            "firmware_dir=?, ssh_key=?, auth_mode=?, auto_update=? WHERE id=?",
+            "firmware_dir=?, ssh_key=?, auth_mode=?, auto_update=?, kind=? "
+            "WHERE id=?",
             (name, ip, port, user, password, firmware_dir,
              ssh_key or None, auth_mode or "password", 1 if auto_update else 0,
-             device_id))
+             kind or "openwrt", device_id))
         conn.commit()
 
 

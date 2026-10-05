@@ -464,6 +464,91 @@ class OpenWRT:
             })
         return out
 
+    # ------------------------------------------------------- bridge FDB
+    def poll_fdb(self) -> dict:
+        """Bridge-FDB over all local bridges via `brctl showmacs`.
+
+        Independent of LLDP: fills the L2 adjacency gap ("wer hängt wo an")
+        even when lldpd is off and no neighbors are advertised. Returns
+        {"rows": [(bridge, port, port_name, mac), ...], "error": ...}.
+
+        Port numbering is brctl's (decimal); the port name is resolved on
+        the host side from /sys/class/net/<br>/brif/<name>/port_no (hex).
+        The shell below uses only parameter expansion (no `basename`, which
+        is unreliable on these BusyBox OpenWrt boxes) and no \\t regex.
+        """
+        import re
+        CMD = (
+            'for d in /sys/class/net/*; do '
+            '  [ -d "$d/brif" ] || continue; '
+            '  br="${d##*/}"; '
+            '  echo "===BR $br"; '
+            '  for p in "$d"/brif/*; do [ -e "$p" ] || continue; '
+            '    n="${p##*/}"; echo "PORT $n $(cat $p/port_no 2>/dev/null)"; '
+            '  done; '
+            '  echo "===MACS $br"; brctl showmacs "$br" 2>/dev/null | head -400; '
+            'done; echo "===DONE==="'
+        )
+        try:
+            rc, out, err = self.run(CMD, timeout=40)
+        except Exception as exc:
+            return {"rows": [], "error": str(exc)}
+        if rc != 0:
+            return {"rows": [], "error": ((out or err) or "").strip()[:300]}
+
+        rows = []
+        cur_bridge = None
+        port_map = {}      # per bridge: brctl port (int) -> port name
+        macs_mode = False
+        for line in out.splitlines():
+            s = line.strip()
+            if s.startswith("===BR "):
+                cur_bridge = s[6:].strip()
+                port_map = {}
+                macs_mode = False
+                continue
+            if s.startswith("PORT ") and cur_bridge:
+                parts = s.split()
+                if len(parts) >= 3:
+                    m = re.match(r"0[xX]([0-9a-fA-F]+)", parts[2])
+                    if m:
+                        port_map[int(m.group(1), 16)] = parts[1]
+                continue
+            if s.startswith("===MACS "):
+                macs_mode = True
+                continue
+            if s.startswith("==="):      # ===DONE=== / any other marker
+                macs_mode = False
+                continue
+            if not macs_mode or not cur_bridge:
+                continue
+            f = line.split("\t")
+            if len(f) < 2:
+                continue
+            try:
+                port = int(f[0].strip())
+            except ValueError:
+                continue
+            mac = f[1].strip().lower()
+            if not re.fullmatch(r"([0-9a-f]{2}:){5}[0-9a-f]{2}", mac):
+                continue
+            is_local = f[2].strip().lower() if len(f) > 2 else ""
+            if is_local == "yes":
+                continue                # own AP MAC, not a client
+            rows.append((cur_bridge, port, port_map.get(port, ""), mac))
+        # brctl showmacs meldet dieselbe (bridge,port,mac) je Eintrag nochmal;
+        # deduplizieren, sonst stoesst save_fdb auf den UNIQUE-Key (device_id,
+        # bridge, port, mac). Reihenfolge beibehalten.
+        seen = set()
+        dedup = []
+        for r in rows:
+            k = (r[0], r[1], r[3])
+            if k in seen:
+                continue
+            seen.add(k)
+            dedup.append(r)
+        return {"rows": dedup, "error": None}
+
     def activate_lldp(self) -> dict:
         """lldpd (ggf. nach Installation via apk add) starten.
         Bleibt nach Reboot aktiv (initscript wird registriert)."""
