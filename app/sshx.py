@@ -18,7 +18,8 @@ class OpenWRT:
 
     def __init__(self, ip: str, port: int = 22, user: str = "root",
                  password: str = "", firmware_dir: str = "", timeout: int = 15,
-                 ssh_key: str = "", auth_mode: str = "password"):
+                 ssh_key: str = "", auth_mode: str = "password",
+                 ssh_key_passphrase: str = ""):
         self.ip = ip
         self.port = port
         self.user = user
@@ -27,21 +28,39 @@ class OpenWRT:
         self.timeout = timeout
         self.ssh_key = ssh_key or ""
         self.auth_mode = auth_mode or "password"
+        self.ssh_key_passphrase = ssh_key_passphrase or ""
 
     # ------------------------------------------------------------------ SSH
     def _pkey(self):
-        """Parse private key text (OpenSSH/PEM) into a paramiko key object."""
+        """Parse private key text (OpenSSH/PEM) into a paramiko key object.
+
+        Handles password-protected (encrypted) keys: if the key is encrypted
+        and a passphrase is stored, it is passed to paramiko; if the key is
+        encrypted but no passphrase is set, a clear, actionable error is raised
+        instead of a generic "key not readable" message.
+        """
         last_exc = None
         names = ["Ed25519Key", "RSAKey", "ECDSAKey", "DSSKey", "DSKey"]
+        passphrase = self.ssh_key_passphrase or None
         for name in names:
             cls = getattr(paramiko, name, None)
             if cls is None:
                 continue
             try:
-                return cls.from_private_key(io.StringIO(self.ssh_key))
+                return cls.from_private_key(
+                    io.StringIO(self.ssh_key),
+                    password=passphrase,
+                )
             except Exception as exc:
                 last_exc = exc
-        raise ValueError("privater SSH-Key nicht lesbar: %s" % last_exc)
+        msg = "privater SSH-Key nicht lesbar: %s" % last_exc
+        if isinstance(last_exc, paramiko.PasswordRequiredException):
+            if passphrase:
+                msg = "privater SSH-Key verschluesselt: Passphrase nicht korrekt"
+            else:
+                msg = ("privater SSH-Key ist verschluesselt (passwortgeschuetzt) – "
+                       "Bitte im Geraet-Dialog die Key-Passphrase eintragen")
+        raise ValueError(msg)
 
     def _client(self):
         client = paramiko.SSHClient()

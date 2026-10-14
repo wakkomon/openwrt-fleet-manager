@@ -198,6 +198,7 @@ def init_db() -> None:
         # migration: SSH-Key-Login + Auto-Update columns (older DBs)
         for _col, _ddl in (("auth_mode", "TEXT NOT NULL DEFAULT 'password'"),
                            ("ssh_key", "TEXT"),
+                           ("ssh_key_passphrase", "TEXT"),
                            ("auto_update", "INTEGER NOT NULL DEFAULT 0"),
                            ("kind", "TEXT NOT NULL DEFAULT 'openwrt'")):
             try:
@@ -224,14 +225,16 @@ def get_db() -> sqlite3.Connection:
 
 def add_device(name: str, ip: str, port: int, user: str, password: str,
                firmware_dir: str, ssh_key: str = "", auth_mode: str = "password",
-               auto_update: bool = False, kind: str = "openwrt") -> int:
+               auto_update: bool = False, kind: str = "openwrt",
+               ssh_key_passphrase: str = "") -> int:
     with _lock, _connect() as conn:
         cur = conn.execute(
             "INSERT INTO devices (name, ip, port, user, password, firmware_dir, "
-            "ssh_key, auth_mode, auto_update, kind) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "ssh_key, auth_mode, auto_update, kind, ssh_key_passphrase) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (name, ip, port, user, password, firmware_dir,
              ssh_key or None, auth_mode or "password", 1 if auto_update else 0,
-             kind or "openwrt"),
+             kind or "openwrt", ssh_key_passphrase or None),
         )
         conn.commit()
         return int(cur.lastrowid)
@@ -666,15 +669,15 @@ def list_jobs(limit: int = 100) -> list:
 def update_device(device_id: int, name: str, ip: str, port: int, user: str,
                   password: str, firmware_dir: str, ssh_key: str = "",
                   auth_mode: str = "password", auto_update: bool = False,
-                  kind: str = "openwrt") -> None:
+                  kind: str = "openwrt", ssh_key_passphrase: str = "") -> None:
     with _lock, _connect() as conn:
         conn.execute(
             "UPDATE devices SET name=?, ip=?, port=?, user=?, password=?, "
-            "firmware_dir=?, ssh_key=?, auth_mode=?, auto_update=?, kind=? "
-            "WHERE id=?",
+            "firmware_dir=?, ssh_key=?, auth_mode=?, auto_update=?, kind=?, "
+            "ssh_key_passphrase=? WHERE id=?",
             (name, ip, port, user, password, firmware_dir,
              ssh_key or None, auth_mode or "password", 1 if auto_update else 0,
-             kind or "openwrt", device_id))
+             kind or "openwrt", ssh_key_passphrase or None, device_id))
         conn.commit()
 
 
