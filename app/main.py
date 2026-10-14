@@ -366,6 +366,7 @@ def _mask(row: dict) -> dict:
     out = dict(row)
     out["password"] = "********" if row.get("password") else ""
     out["ssh_key"] = "********" if row.get("ssh_key") else ""
+    out["ssh_key_passphrase"] = "********" if row.get("ssh_key_passphrase") else ""
     return out
 
 
@@ -456,6 +457,7 @@ class DeviceIn(BaseModel):
     auth_mode: str = "password"
     auto_update: bool = False
     kind: str = "openwrt"
+    ssh_key_passphrase: str = ""
 
 
 @app.post("/api/devices")
@@ -465,7 +467,8 @@ def api_device_add(d: DeviceIn, _u: dict = Depends(require_admin)):
     did = db.add_device(d.name, d.ip, d.port, d.user, d.password,
                         d.firmware_dir or "https://downloads.openwrt.org/releases",
                         ssh_key=d.ssh_key, auth_mode=d.auth_mode,
-                        auto_update=d.auto_update, kind=d.kind)
+                        auto_update=d.auto_update, kind=d.kind,
+                        ssh_key_passphrase=d.ssh_key_passphrase)
     return {"id": did}
 
 
@@ -508,6 +511,7 @@ class DevicePut(BaseModel):
     auth_mode: str = "password"
     auto_update: bool = False
     kind: str = "openwrt"
+    ssh_key_passphrase: str | None = None
 
 
 @app.put("/api/devices/{device_id}")
@@ -517,9 +521,11 @@ def api_device_update(device_id: int, body: DevicePut,
     # masked/empty fields keep the stored secret
     pw = row["password"] if body.password in (None, "", "********") else body.password
     key = (row.get("ssh_key") or "") if body.ssh_key in (None, "", "********") else body.ssh_key
+    key_pass = (row.get("ssh_key_passphrase") or "") if body.ssh_key_passphrase in (None, "", "********") else body.ssh_key_passphrase
     db.update_device(device_id, body.name, body.ip, body.port, body.user, pw,
                      body.firmware_dir or "https://downloads.openwrt.org/releases",
-                     key, body.auth_mode, body.auto_update, body.kind)
+                     key, body.auth_mode, body.auto_update, body.kind,
+                     ssh_key_passphrase=key_pass)
     _job(device_id, "device", "ok", "Zugangsdaten aktualisiert")
     return {"ok": True}
 
