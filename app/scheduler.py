@@ -19,6 +19,7 @@ def make_device(row: dict) -> OpenWRT:
         password=row["password"], firmware_dir=row.get("firmware_dir") or "",
         ssh_key=row.get("ssh_key") or "",
         auth_mode=row.get("auth_mode") or "password",
+        ssh_key_passphrase=row.get("ssh_key_passphrase") or "",
     )
 
 
