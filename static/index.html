@@ -345,6 +345,8 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
         <div id="eKeyRow" style="display:none">
           <label>Privater Schlüssel (******** = behalten; leer = keiner)</label>
           <textarea id="eKey" rows="5"></textarea>
+          <label>Schlüssel-Passphrase (******** = behalten; leer = keine / kein verschlüsselter Key)</label>
+          <input id="eKeyPass" type="password">
         </div>
         </div>
         <label>Firmware-Quelle</label><input id="eFwDir">
@@ -462,7 +464,9 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
     </select>
     <div id="aKeyRow" style="display:none">
       <label>Privater Schlüssel (PEM / OpenSSH)</label>
-      <textarea id="aKey" rows="6" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"></textarea>
+      <textarea id="aKey" rows="6" placeholder="[REDACTED PRIVATE KEY]"></textarea>
+      <label>Schlüssel-Passphrase (falls der Key verschlüsselt ist)</label>
+      <input id="aKeyPass" type="password" placeholder="leer, wenn der Key nicht verschlüsselt ist">
     </div>
     <label style="display:flex;align-items:center;gap:6px;margin-top:10px"><input type="checkbox" id="aAuto" style="width:auto"> Automatische Firmware-Updates erlauben</label>
     <label>Firmware-Quelle</label><input id="aFwDir" value="https://downloads.openwrt.org/releases">
@@ -656,11 +660,12 @@ async function addDevice(){
     password:$('#aPass').value,firmware_dir:$('#aFwDir').value.trim(),
     kind:$('#aKind')?$('#aKind').value:'openwrt',
     ssh_key:$('#aKey')?$('#aKey').value:'',auth_mode:$('#aMode').value,
+    ssh_key_passphrase:$('#aKeyPass')?$('#aKeyPass').value:'',
     auto_update:!!($('#aAuto')&&$('#aAuto').checked)};
   if(!body.name||!body.ip){alert('Name und IP erforderlich');return;}
   const r=await api('/api/devices',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(body)});
-  if(r){['aName','aIp','aPass'].forEach(i=>$('#'+i).value=''); if($('#aKey'))$('#aKey').value='';}
+  if(r){['aName','aIp','aPass','aKeyPass'].forEach(i=>$('#'+i).value=''); if($('#aKey'))$('#aKey').value='';}
   hideAddDevice(); refreshAll();
 }
 function showBulk(){$('#bModal').style.display='block'; updateBulkPreview();}
@@ -1497,6 +1502,7 @@ function toggleEditAccess(){
     $('#ePass').value=d.password||''; $('#eMode').value=d.auth_mode||'password';
     if($('#eKind')) $('#eKind').value=d.kind||'openwrt';
     $('#eKey').value=d.ssh_key||''; $('#eKeyRow').style.display=(d.auth_mode==='key')?'':'none';
+    $('#eKeyPass').value=d.ssh_key_passphrase||'';
     $('#eFwDir').value=d.firmware_dir||'https://downloads.openwrt.org/releases';
     $('#eAuto').checked=!!d.auto_update;
     applyKindToEdit();
@@ -1522,6 +1528,7 @@ async function saveDeviceEdit(){
   const body={name:$('#eName').value.trim(),ip:$('#eIp').value.trim(),
     port:parseInt($('#ePort').value)||22,user:$('#eUser').value.trim()||'root',
     password:$('#ePass').value,ssh_key:$('#eKey').value,
+    ssh_key_passphrase:$('#eKeyPass').value,
     kind:$('#eKind')?$('#eKind').value:'openwrt',
     auth_mode:$('#eMode').value,firmware_dir:$('#eFwDir').value.trim(),
     auto_update:$('#eAuto').checked};
