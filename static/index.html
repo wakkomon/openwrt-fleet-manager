@@ -6,17 +6,18 @@
 <title>OpenWRT Fleet Manager</title>
 <style>
 :root { --bg:#10151c; --card:#1a222c; --line:#2a3644; --tx:#dce6f0; --dim:#8fa2b5;
-        --acc:#4da3ff; --ok:#3ddc84; --warn:#ffb020; --err:#ff5d5d; }
+        --acc:#2f80e7; --hdr:#172533; --ok:#3ddc84; --warn:#ffb020; --err:#ff5d5d; }
 * { box-sizing:border-box }
 body { margin:0; font:14px/1.45 system-ui,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--tx) }
-header { display:flex; align-items:center; gap:14px; padding:14px 20px; background:var(--card);
-         border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; flex-wrap:wrap }
-header h1 { font-size:17px; margin:0; font-weight:600 }
-header .sub { color:var(--dim); font-size:12px }
+header { display:flex; align-items:center; gap:16px; padding:0 22px; height:56px; background:var(--hdr); border-bottom:1px solid #0e1a26; flex-wrap:nowrap }
+header h1 { font-size:16px; margin:0; font-weight:600; color:#fff; letter-spacing:.2px; white-space:nowrap }
+header h1 .logo { color:var(--acc); margin-right:6px }
+header .sub { color:#8ea1b5; font-size:12px }
 .wrap { padding:18px 20px; max-width:1250px; margin:0 auto }
 .btn { background:var(--acc); color:#08131e; border:0; border-radius:6px; padding:7px 13px;
        cursor:pointer; font-weight:600; font-size:13px }
 .btn.ghost { background:transparent; color:var(--acc); border:1px solid var(--acc) }
+.btn.ghost:hover { color:#fff; background:#22344a }
 .btn.small { padding:4px 9px; font-size:12px }
 .btn.ok { background:var(--ok) } .btn.warn { background:var(--warn) }
 .btn.danger { background:var(--err); color:#160b0b }
@@ -54,6 +55,7 @@ th .arrow { font-size:10px }
 .hint { font-size:12px; color:var(--dim) }
 .tabbar { display:flex; gap:6px; margin-bottom:16px; flex-wrap:wrap }
 .tabbar .btn.active { background:var(--tx); }
+.tabbar .btn.ghost:hover { color:#fff; background:#22344a; border-color:#2f465f }
 .badge { background:#0d1219; border:1px solid var(--line); border-radius:9px; padding:2px 9px;
          font-size:12px; color:var(--dim) }
 .stat { background:#0d1219; border:1px solid var(--line); border-radius:10px; padding:14px 16px }
@@ -95,7 +97,7 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
 </head>
 <body>
 <header>
-  <h1>📡 OpenWRT Fleet Manager</h1>
+  <h1><span class="logo">⬢</span>OpenWRT Fleet Manager</h1>
   <div class="sub"><span id="health"></span></div>
   <div style="margin-left:auto" class="row">
     <span class="badge" id="whoami"></span>
