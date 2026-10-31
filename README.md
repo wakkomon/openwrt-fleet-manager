@@ -1,5 +1,9 @@
 # OpenWRT Fleet Manager
 
+> **Hinweis:** Dieses Projekt wurde KI-generiert — Quellcode, UI und Deployment
+> wurden von einem KI-Agenten (Hermes Agent, Nous Research) in enger Zusammenarbeit
+> mit dem Betreiber erstellt und getestet.
+
 Deutsche FastAPI-Web-App zur Ueberwachung und Verwaltung einer OpenWRT-AP-Flotte
 (SSH-Zugriff via paramiko, Live-Dashboard, WLAN-Client-Sicht, UCI-Edits, Backups).
 
