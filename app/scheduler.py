@@ -13,7 +13,37 @@ from .hp import HpSwitch
 from .sshx import OpenWRT
 
 
-def make_device(row: dict) -> OpenWRT:
+def _kind(row: dict) -> str:
+    return row.get("kind") or "openwrt"
+
+
+def make_device(row: dict):
+    """Collector passend zur Geraete-Art bauen.
+
+    openwrt -> OpenWRT (SSH)
+    unifi   -> UniFiSwitch (SSH, Ubiquiti swctrl; Subklasse von OpenWRT)
+    pfsense -> PfSense (Web-Interface HTTPS, kein SSH)
+    hp1810  -> nicht hier (make_hp)
+    """
+    kind = _kind(row)
+    if kind == "pfsense":
+        from .pfsense import PfSense
+        port = row["port"] or 443
+        if port == 22:  # SSH-Default ist fuer pfSense sinnlos -> Web-Port
+            port = 443
+        return PfSense(
+            ip=row["ip"], port=port, user=row["user"],
+            password=row["password"],
+        )
+    if kind == "unifi":
+        from .unifi import UniFiSwitch
+        return UniFiSwitch(
+            ip=row["ip"], port=row["port"], user=row["user"],
+            password=row["password"], firmware_dir=row.get("firmware_dir") or "",
+            ssh_key=row.get("ssh_key") or "",
+            auth_mode=row.get("auth_mode") or "password",
+            ssh_key_passphrase=row.get("ssh_key_passphrase") or "",
+        )
     return OpenWRT(
         ip=row["ip"], port=row["port"], user=row["user"],
         password=row["password"], firmware_dir=row.get("firmware_dir") or "",
@@ -35,6 +65,15 @@ def _is_hp(row: dict) -> bool:
     return (row.get("kind") or "openwrt") == "hp1810"
 
 
+def _is_pfsense(row: dict) -> bool:
+    return (row.get("kind") or "openwrt") == "pfsense"
+
+
+def _is_web(row: dict) -> bool:
+    """Web-verwaltete Geraete ohne SSH: HP-Switch und pfSense."""
+    return _is_hp(row) or _is_pfsense(row)
+
+
 def check_status(device_id: int) -> None:
     row = db.get_device(device_id)
     if not row:
@@ -43,6 +82,24 @@ def check_status(device_id: int) -> None:
         db.upsert_online(device_id, make_hp(row).is_online())
         return
     dev = make_device(row)
+    if _is_pfsense(row):
+        # pfSense: volle Web-Info holen; Login-/Erreichbarkeitsfehler als
+        # Grund im device_info hinterlegen (UI zeigt ihn in den Details).
+        try:
+            info = dev.full_info()
+        except Exception as exc:  # pragma: no cover
+            db.upsert_online(device_id, False)
+            db.upsert_device_info(device_id,
+                                  json.dumps({"error": str(exc)[:300]}))
+            db.add_job(device_id, "status", "error", str(exc)[:300])
+            return
+        err = (info.get("error") or "")
+        online = not err
+        db.upsert_online(device_id, online)
+        db.upsert_device_info(device_id, json.dumps(info))
+        if err:
+            db.add_job(device_id, "status", "error", err[:300])
+        return
     online = dev.is_online()
     db.upsert_online(device_id, online)
 
@@ -51,8 +108,28 @@ def scan_clients(device_id: int) -> None:
     row = db.get_device(device_id)
     if not row:
         return
-    if _is_hp(row):
-        # Switch: keine ARP/WLAN-Clients; die Port-Belegung laeuft ueber die FDB
+    if _is_pfsense(row):
+        # pfSense: keine SSH-ARP/WLAN-Clients
+        return
+    if (row.get("kind") or "") == "unifi":
+        # UniFi-Switch: MAC-Tabelle (FDB) als LAN-Clients ablegen.
+        dev = make_device(row)
+        if not dev.is_online():
+            db.upsert_online(device_id, False)
+            return
+        db.upsert_online(device_id, True)
+        try:
+            fdb_res = dev.poll_fdb()
+            fdb = fdb_res.get("rows", []) if isinstance(fdb_res, dict) else fdb_res
+            db.save_fdb(device_id, fdb)
+            # rows: (bridge, port, port_name, mac) — port-Label aus port_name
+            db.replace_clients(device_id, "lan",
+                               [("", r[3], "",
+                                 r[2] or ("Port %s" % r[1]))
+                                for r in fdb])
+            db.replace_clients(device_id, "wlan", [])
+        except Exception as exc:  # pragma: no cover
+            db.add_job(device_id, "scan", "error", str(exc))
         return
     dev = make_device(row)
     if not dev.is_online():
@@ -102,6 +179,12 @@ def _poll_hp(device_id: int, row: dict) -> None:
                 fdb_rows.append(("br0", p, "Port %d" % p, m.get("mac")))
         db.save_fdb(device_id, fdb_rows)
         fdb_msg = "%d MACs" % len(fdb_rows)
+        if fdb_rows:
+            # MAC-Liste (Clients) automatisch aktuell halten.
+            db.replace_clients(device_id, "lan",
+                               [("", r[3] or "", "", r[2] or "")
+                                for r in fdb_rows])
+            db.replace_clients(device_id, "wlan", [])
     nb = [{
         "interface": n.get("iface") or "",
         "mac": n.get("mac") or "",
@@ -119,8 +202,9 @@ def _poll_hp(device_id: int, row: dict) -> None:
         "lldpd": "hp-web", "version": "", "error": "; ".join(errs)[:300],
     }
     db.save_lldp(device_id, local, nb)
+    prefix = ("; ".join(login_err)[:160] + " | ") if login_err else ""
     db.add_job(device_id, "lldp", "ok" if not login_err else "error",
-               "%d Nachbarn | %s" % (len(nb), fdb_msg))
+               "%s%d Nachbarn | %s" % (prefix, len(nb), fdb_msg))
 
 
 def poll_lldp(device_id: int) -> None:
@@ -138,6 +222,10 @@ def poll_lldp(device_id: int) -> None:
     row = db.get_device(device_id)
     if not row:
         return
+    if _is_pfsense(row):
+        # pfSense wird per Web-Interface verwaltet; LLDP/FDB gibt es dort nicht.
+        db.upsert_online(device_id, make_device(row).is_online())
+        return
     if _is_hp(row):
         _poll_hp(device_id, row)
         return
@@ -150,6 +238,14 @@ def poll_lldp(device_id: int) -> None:
         fdb_rows = fdb_res.get("rows", [])
         db.save_fdb(device_id, fdb_rows)
         fdb_msg = "%d MACs" % len(fdb_rows)
+        if (row.get("kind") or "") == "unifi" and fdb_rows:
+            # MAC-Liste (Clients) automatisch aktuell halten: FDB = Clients.
+            # rows: (bridge, port, port_name, mac)
+            db.replace_clients(device_id, "lan",
+                               [("", r[3] or "", "",
+                                 r[2] or ("Port %s" % r[1]))
+                                for r in fdb_rows])
+            db.replace_clients(device_id, "wlan", [])
     except Exception as exc:  # pragma: no cover
         fdb_msg = "fdb: %s" % exc
 
@@ -183,6 +279,11 @@ def survey_device(device_id: int) -> None:
         return
     if _is_hp(row):
         return  # Switch ohne SSH: Status/LLDP/FDB laufen ueber poll_lldp
+    if (row.get("kind") or "") == "unifi":
+        # UniFi-Switch: SSH-Survey bringt nur System-Info; die MAC-Tabelle
+        # (FDB) als LAN-Clients holen, sonst bleibt die Liste leer.
+        scan_clients(device_id)
+        return
     dev = make_device(row)
     try:
         res = dev.survey()
@@ -204,7 +305,11 @@ def survey_device(device_id: int) -> None:
     manual = bool(prev_info.get("manual"))
     # auto-rename only while the name is still the auto-managed one;
     # a manual rename sets the "manual" flag (device_info) and wins.
-    if host and current != host and not manual:
+    # Kollisionsschutz: nicht auf einen Namen umbenennen, den bereits ein
+    # anderes Geraet fuehrt (sonst taucht z.B. "AP-OG4" doppelt auf).
+    taken = any((d["name"] or "").strip() == host.strip()
+                for d in db.list_devices() if d["id"] != device_id)
+    if host and current != host and not manual and not taken:
         db.rename_device(device_id, host)
 
     leases = res.get("leases") or {}          # ip -> hostname
