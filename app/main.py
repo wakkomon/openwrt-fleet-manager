@@ -10,7 +10,9 @@ OpenWRT-router per SSH verwalten:
 import base64
 import hashlib
 import hmac
+import itertools
 import json
+from typing import Literal
 import os
 import re
 import secrets
@@ -377,17 +379,87 @@ def _job(device_id, kind, status, message):
         pass
 
 
+def _refresh_status_after_update(device_id: int, row: dict,
+                                 firmware: bool = False) -> None:
+    """Router-Status nach einem (Massen-)Update-Job frisch einlesen.
+
+    Danach zeigen online / Version / Firmware-Pill / Paket-Zaehler in der
+    Router-Tabelle wieder den Stand von der Gerat selbst, ohne dass der
+    Scheduler erst 3 h spaeter nachschaut. Bewusst NICHT updater.check_one():
+    das wuerde bei aktivem Auto-Update sofort den naechsten Flash anstossen.
+    """
+    try:
+        dev = scheduler.make_device(row)
+        online = dev.is_online()
+        db.upsert_online(device_id, online)
+        if not online:
+            return
+        if firmware:
+            try:
+                scheduler.survey_device(device_id)   # Hostname/Version/Clients
+            except Exception:
+                pass
+            try:
+                res = dev.check_update()
+                db.set_firmware_state(device_id, res.get("current", ""),
+                                      res.get("latest", ""),
+                                      bool(res.get("has_update")))
+            except Exception:
+                pass
+        try:
+            pkg = dev.package_check(refresh=True)
+        except Exception as exc:
+            pkg = {"pkgman": "", "count": 0, "packages": [],
+                   "error": str(exc)[:160]}
+        updater._store_pkg_state(device_id, pkg)
+        info = db.get_device_info(device_id) or {}
+        fw = db.get_firmware_state(device_id) or {}
+        cnt = 0 if pkg.get("error") else int(pkg.get("count") or 0)
+        status = ("error" if pkg.get("error")
+                  else "pkg-update" if cnt
+                  else "update-available" if fw.get("has_update")
+                  else "up-to-date")
+        updater._record(device_id, row, status, info.get("version") or "",
+                        "Status nach Update-Job neu eingelesen", source="update")
+    except Exception:
+        pass
+
+
+def _wait_pkg_restore_done(device_id: int, timeout: float = 900.0) -> None:
+    """Auf den automatischen Paket-Restore nach dem Flash warten (pending=False)."""
+    end = time.time() + timeout
+    while time.time() < end:
+        pr = (db.get_device_info(device_id) or {}).get("pkg_restore")
+        if not isinstance(pr, dict) or not pr.get("pending"):
+            return
+        time.sleep(10)
+
+
 def _is_hp(row: dict) -> bool:
     return (row.get("kind") or "openwrt") == "hp1810"
 
 
+def _is_pfsense(row: dict) -> bool:
+    return (row.get("kind") or "openwrt") == "pfsense"
+
+
+def _is_web_only(row: dict) -> bool:
+    """Geräte, die nur per Web-Interface (kein Router-SSH) verwaltet werden."""
+    return _is_hp(row) or _is_pfsense(row)
+
+
 def _ssh_only(row: dict) -> None:
-    """Endpunkte, die zwingend SSH brauchen, fuer den HP-1810-Switch sperren."""
+    """Endpunkte, die zwingend SSH brauchen, für Web-Interface-Geräte sperren."""
     if _is_hp(row):
         raise HTTPException(
             400,
             "HP 1810: Dieser Switch wird per Web-Interface verwaltet – "
             "SSH ist nicht verfuegbar.")
+    if _is_pfsense(row):
+        raise HTTPException(
+            400,
+            "pfSense: This device is managed via its web interface – "
+            "SSH-based operations are not available.")
 
 
 def _hp_virtual_info(device_id: int, row: dict) -> dict:
@@ -456,7 +528,7 @@ class DeviceIn(BaseModel):
     ssh_key: str = ""
     auth_mode: str = "password"
     auto_update: bool = False
-    kind: str = "openwrt"
+    kind: Literal["openwrt", "unifi", "pfsense", "hp1810"] = "openwrt"
     ssh_key_passphrase: str = ""
 
 
@@ -510,7 +582,7 @@ class DevicePut(BaseModel):
     ssh_key: str | None = None
     auth_mode: str = "password"
     auto_update: bool = False
-    kind: str = "openwrt"
+    kind: Literal["openwrt", "unifi", "pfsense", "hp1810"] = "openwrt"
     ssh_key_passphrase: str | None = None
 
 
@@ -526,6 +598,12 @@ def api_device_update(device_id: int, body: DevicePut,
                      body.firmware_dir or "https://downloads.openwrt.org/releases",
                      key, body.auth_mode, body.auto_update, body.kind,
                      ssh_key_passphrase=key_pass)
+    # Name/Art manuell gesetzt -> "manual"-Flag, damit der 5-Min-Survey den
+    # Router nicht wieder auf seinen internen Hostnamen zurückbenennt
+    # ( Ursache für "Router verschwunden / AP-OG4 doppelt").
+    info = db.get_device_info(device_id) or {}
+    info["manual"] = True
+    db.upsert_device_info(device_id, json.dumps(info))
     _job(device_id, "device", "ok", "Zugangsdaten aktualisiert")
     return {"ok": True}
 
@@ -560,6 +638,14 @@ def api_device_info(device_id: int, _u: dict = Depends(auth)):
         info = dev.full_info()
     except Exception as exc:
         raise HTTPException(502, f"device unreachable: {exc}")
+    # full_info() enthaelt KEIN "packages"-Feld; das bisherige blankette
+    # Upsert hat thereby die vom Scheduler/updater befuellte Paket-Liste
+    # (Basis des Update-Buttons -> sonst "keine updates") geloescht. Vorher
+    # "packages" und den pkg-Restore-Snapshot aus dem Bestand uebernehmen.
+    prev = db.get_device_info(device_id) or {}
+    for key in ("packages", "pkg_restore"):
+        if not info.get(key) and prev.get(key):
+            info[key] = prev[key]
     db.upsert_device_info(device_id, json.dumps(info))
     db.upsert_online(device_id, True)
     return info
@@ -571,8 +657,9 @@ def api_device_info(device_id: int, _u: dict = Depends(auth)):
 @app.post("/api/devices/{device_id}/clients")
 def api_scan_clients(device_id: int, _u: dict = Depends(auth)):
     row = _device_or_404(device_id)
-    if _is_hp(row):
-        # Switch ohne SSH: die MAC-Tabelle (FDB) ist die "Client"-Liste.
+    if _is_hp(row) or (row.get("kind") or "") == "unifi":
+        # Switch ohne ARP-Kontext (HP-Web / UniFi-Switch): die MAC-Tabelle
+        # (FDB) ist die "Client"-Liste.
         scheduler.poll_lldp(device_id)
         label_map = _client_label_map()
         lan = []
@@ -767,6 +854,11 @@ def api_firmware_wait(device_id: int, timeout_s: int = 300,
     ok = wait_for_reboot(dev, wait_s=15, poll=10, timeout=min(timeout_s, 240))
     db.upsert_online(device_id, ok)
     updater.finalize_manual(device_id, ok)
+    if ok:
+        # Nach dem Flash Status frisch einlesen: Version + Firmware-Pill.
+        # Der Paket-Zaehler haengt am Paket-Restore-Status (dPkgRestore);
+        # der Scheduler praezisiert ihn beim naechsten Poll.
+        _refresh_status_after_update(device_id, row, firmware=True)
     return {"online": ok, "waited_s": int(time.time() - back)}
 
 
@@ -808,6 +900,9 @@ def _pkg_worker(device_id: int, row: dict, job: int, names: list) -> None:
                              "Paket-Update fehlgeschlagen: %s" % str(exc)[:200])
     finally:
         PKG_RUNNING.discard(device_id)
+        # Job fertig -> Router-Status sofort neu einlesen (online, Version,
+        # Paket-Zaehler) statt auf den naechsten Scheduler-Tick zu warten.
+        _refresh_status_after_update(device_id, row, firmware=False)
 
 
 @app.post("/api/devices/{device_id}/packages/update")
@@ -842,6 +937,337 @@ def api_pkg_update(device_id: int, body: PkgUpdateIn = PkgUpdateIn(),
 def api_pkg_update_status(device_id: int, _u: dict = Depends(auth)):
     return {"running": device_id in PKG_RUNNING,
             "output": _PKG_OUT.get(device_id, "")}
+
+
+# ----------------------------------------------------------------------
+# Massen-Updates: Haken in der Router-Tabelle, getrennt nach Paketen und
+# Firmware. Ein Job arbeitet die gewaehlten Router der Reihe nach ab, damit
+# opkg-Upgrade und sysupgrade nie gegeneinander laufen. Router, auf denen
+# schon ein Update laeuft, werden uebersprungen und im Ergebnis ausgewiesen.
+# Nach jedem Router geht sein Status zurueck in die Tabelle.
+# ----------------------------------------------------------------------
+MASS_KEEP = 6
+_MASS: dict = {}
+_MASS_LOCK = threading.Lock()
+_MASS_SEQ = itertools.count(1)
+
+
+class MassUpdateIn(BaseModel):
+    device_ids: list[int]
+    preserve_config: bool = True
+
+
+def _mass_state(job_id: int) -> dict:
+    with _MASS_LOCK:
+        m = _MASS.get(job_id)
+        if not m:
+            return {}
+        return {"id": job_id, "kind": m["kind"], "running": m["running"],
+                "done": m["done"], "total": m["total"], "error": m["error"],
+                "items": [dict(x) for x in m["items"]],
+                "output": "\n".join(m["lines"])[-20000:]}
+
+
+def _mass_item(job_id: int, idx: int, **kw) -> None:
+    with _MASS_LOCK:
+        m = _MASS.get(job_id)
+        if m:
+            m["items"][idx].update(kw)
+
+
+def _mass_log(job_id: int, text: str) -> None:
+    """Live-Log-Zeilen des Massen-Jobs (opkg-Fortschritt in einer Zeile)."""
+    with _MASS_LOCK:
+        m = _MASS.get(job_id)
+        if not m:
+            return
+        lines = m["lines"]
+        for ln in str(text).splitlines():
+            if lines and lines[-1].endswith("\r"):
+                lines[-1] = lines[-1][:-1] + ln
+            else:
+                lines.append(ln)
+        del lines[:-600]
+
+
+def _pkg_count(device_id: int) -> int:
+    try:
+        return int(((db.get_device_info(device_id) or {}).get("packages")
+                    or {}).get("count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _pkg_restore_note(device_id: int) -> str:
+    pr = (db.get_device_info(device_id) or {}).get("pkg_restore") or {}
+    return str(pr.get("result") or pr.get("status") or "")
+
+
+def _mass_pkg(dev, device_id: int, name: str, job_id: int, idx: int) -> None:
+    """Paket-Update eines Routers im Massen-Job (opkg/apk, ohne Reboot)."""
+    before = _pkg_count(device_id)
+    _mass_log(job_id, f"{name}: Paket-Update gestartet "
+                      f"(vorher {before} aktualisierbare Pakete)")
+    job = db.add_update_job(device_id, name, "running", "manual", "",
+                            "Massen-Paket-Update: alle Pakete")
+    res = dev.update_packages(None, timeout=900,
+                              on_output=lambda s: _mass_log(job_id,
+                                                            f"[{name}] {s}"))
+    if not res.get("pkgman"):
+        why = res.get("error") or "kein Paketmanager gefunden"
+        db.finish_update_job(job, "error", why)
+        _mass_item(job_id, idx, state="skipped", error=why)
+        _mass_log(job_id, f"{name}: uebersprungen ({why})")
+        return
+    # Zaehler frisch lesen, damit die Tabelle danach den Stand nach dem
+    # Upgrade zeigt (nicht den von vor dem Job).
+    _refresh_status_after_update(device_id, db.get_device(device_id) or {},
+                                 firmware=False)
+    after = _pkg_count(device_id)
+    ok = res.get("rc") == 0
+    err = None if ok else (res.get("error") or f"rc={res.get('rc')}")[:300]
+    db.finish_update_job(job, "done" if ok else "error",
+                         (f"{before} -> {after} Pakete offen" if ok else err))
+    _mass_item(job_id, idx, state="ok" if ok else "error", error=err,
+               before=before, after=after)
+    _mass_log(job_id, f"{name}: {'fertig' if ok else 'FEHLER'} "
+                      f"({before} -> {after} Pakete offen)"
+                      + (f" - {err}" if err else ""))
+
+
+def _mass_fw(dev, row: dict, device_id: int, name: str, job_id: int, idx: int,
+             preserve_config: bool) -> None:
+    """Firmware-Update eines Routers im Massen-Job (Image + sysupgrade)."""
+    chk = dev.check_update()
+    current = chk.get("current") or ""
+    latest = chk.get("latest") or ""
+    url = chk.get("url") or ""
+    if not chk.get("has_update") or not url:
+        why = ("kein Update gefunden" if not chk.get("has_update")
+               else "kein Image für dieses Board gefunden")
+        _mass_item(job_id, idx, state="skipped", error=why, current=current)
+        _mass_log(job_id, f"{name}: {why} ({current})")
+        return
+    job = db.add_update_job(device_id, name, "running", "manual", latest,
+                            f"Massen-Firmware-Update {current} → {latest}")
+    staged = _stage_image_on_device(dev, url)
+    image = staged["image"]
+    _mass_log(job_id, f"{name}: Image {staged.get('via')} "
+                      f"({staged.get('size', 0)} Bytes) – sysupgrade "
+                      f"{current} → {latest}")
+    updater.snapshot_packages(device_id, dev)
+    rc, out, err = dev.sysupgrade(image, preserve_config, False)
+    ok = rc == 0 or "started" in (out or "")
+    if ok:
+        _mass_log(job_id, f"{name}: Router startet neu, warte auf Rückkehr")
+        ok = wait_for_reboot(dev, wait_s=30, poll=10, timeout=900)
+    db.upsert_online(device_id, ok)
+    updater.finalize_manual(device_id, ok)
+    db.finish_update_job(
+        job, "done" if ok else "error",
+        "Firmware-Update fertig" if ok
+        else ("Flash-/Reboot-Fehler: " + (err or ""))[:300])
+    if not ok:
+        _mass_item(job_id, idx, state="error", current=current,
+                   error="Router nach dem Flash nicht erreichbar")
+        _mass_log(job_id, f"{name}: FEHLER – Router nach dem Flash nicht "
+                          f"erreichbar")
+        return
+    _wait_pkg_restore_done(device_id)
+    _refresh_status_after_update(device_id, row, firmware=True)
+    newv = (db.get_device_info(device_id) or {}).get("version") or latest
+    _mass_item(job_id, idx, state="ok", error=None, current=newv)
+    _mass_log(job_id, f"{name}: wieder online, Firmware {newv}")
+
+
+def _mass_one(job_id: int, kind: str, idx: int, device_id: int,
+              preserve_config: bool) -> None:
+    row = db.get_device(device_id)
+    name = (row or {}).get("name") or f"#{device_id}"
+    if not row:
+        _mass_item(job_id, idx, state="skipped", error="in der DB unbekannt")
+        _mass_log(job_id, f"#{device_id}: uebersprungen (in der DB unbekannt)")
+        return
+    if _is_web_only(row):
+        why = ("Web-Interface-Gerät ohne SSH" if _is_hp(row)
+               else "pfSense wird per Web-Interface verwaltet")
+        _mass_item(job_id, idx, state="skipped", error=why)
+        _mass_log(job_id, f"{name}: uebersprungen ({why})")
+        return
+    if device_id in PKG_RUNNING or device_id in FIRMWARE_RUNNING:
+        why = "es läuft bereits ein Update auf diesem Router"
+        _mass_item(job_id, idx, state="skipped", error=why)
+        _mass_log(job_id, f"{name}: uebersprungen ({why})")
+        return
+    FIRMWARE_RUNNING.add(device_id)
+    _mass_item(job_id, idx, state="running")
+    try:
+        dev = scheduler.make_device(row)
+        if kind == "packages":
+            _mass_pkg(dev, device_id, name, job_id, idx)
+        else:
+            _mass_fw(dev, row, device_id, name, job_id, idx, preserve_config)
+    finally:
+        FIRMWARE_RUNNING.discard(device_id)
+
+
+def _mass_worker(job_id: int, kind: str, device_ids: list[int],
+                 preserve_config: bool) -> None:
+    try:
+        for idx, device_id in enumerate(device_ids):
+            with _MASS_LOCK:
+                m = _MASS.get(job_id)
+                stop = bool(m and m.get("cancel"))
+            if stop:
+                # Abbruch wirkt zwischen den Routern: der aktuelle gerät nicht
+                # mitten im SSH-Befehl abgebrochen, sonst steht einer halblebig.
+                _mass_item(job_id, idx, state="cancelled")
+                for rest in range(idx + 1, len(device_ids)):
+                    _mass_item(job_id, rest, state="cancelled")
+                _mass_log(job_id, "abgebrochen - übrige Router übersprungen")
+                break
+            try:
+                _mass_one(job_id, kind, idx, device_id, preserve_config)
+            except Exception as exc:
+                _mass_item(job_id, idx, state="error",
+                           error=f"{type(exc).__name__}: {exc}"[:200])
+                _mass_log(job_id, f"#{device_id}: Fehler {type(exc).__name__}: "
+                                  f"{exc}")
+            finally:
+                with _MASS_LOCK:
+                    m = _MASS.get(job_id)
+                    if m:
+                        m["done"] += 1
+    except Exception as exc:
+        _mass_item(job_id, 0, state="error")
+        with _MASS_LOCK:
+            m = _MASS.get(job_id)
+            if m:
+                m["error"] = str(exc)[:200]
+    finally:
+        with _MASS_LOCK:
+            m = _MASS.get(job_id)
+            if m:
+                m["running"] = False
+                m["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            for old in sorted(k for k in _MASS
+                              if k != job_id and not _MASS[k]["running"]):
+                if len(_MASS) <= MASS_KEEP:
+                    break
+                _MASS.pop(old, None)
+
+
+@app.get("/api/mass-update/active")
+def api_mass_update_active(_u: dict = Depends(auth)):
+    """Laufender (oder zuletzt laufender) Massen-Update-Job fuer die UI."""
+    with _MASS_LOCK:
+        ids = sorted(_MASS)
+        run = [i for i in ids if _MASS[i]["running"]]
+        job_id = run[-1] if run else (ids[-1] if ids else 0)
+    if not job_id:
+        return {"active": None}
+    st = _mass_state(job_id)
+    st["kind_label"] = ("Paket-Update" if st.get("kind") == "packages"
+                        else "Firmware-Update")
+    return {"active": st}
+
+
+@app.post("/api/mass-update/{kind}")
+def api_mass_update(kind: Literal["packages", "firmware"], body: MassUpdateIn,
+                    _adm: dict = Depends(require_admin)):
+    """Massen-Update der angehakten Router: Pakete oder Firmware (getrennt)."""
+    ids = list(dict.fromkeys(int(d) for d in (body.device_ids or [])))
+    if not ids:
+        raise HTTPException(400, "Keine Router ausgewählt")
+    targets = []
+    for did in ids:
+        row = db.get_device(did)
+        if not row or _is_web_only(row):
+            continue
+        targets.append(did)
+    job_id = next(_MASS_SEQ)
+    _MASS[job_id] = {
+        "kind": kind, "running": bool(targets), "done": 0, "total": len(targets),
+        "error": "", "finished": None, "lines": [], "cancel": False,
+        "items": [{"id": d,
+                   "name": (db.get_device(d) or {}).get("name") or f"#{d}",
+                   "state": "queued", "error": None} for d in targets],
+    }
+    _mass_log(job_id, f"{len(targets)} Router ausgewählt: "
+                      + ("Paket-Update" if kind == "packages"
+                         else "Firmware-Update"))
+    for did in [d for d in ids if d not in targets]:
+        _mass_log(job_id, f"#{did}: uebersprungen (Web-Interface-Gerät "
+                          f"ohne SSH)")
+    if not targets:
+        _MASS[job_id]["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        return {"started": False, "id": job_id, "total": 0,
+                "note": ("Keiner der gewählten Router ist für dieses "
+                          "Massen-Update geeignet (nur Web-Geräte ohne "
+                          "SSH ausgewählt).")}
+    threading.Thread(target=_mass_worker,
+                     args=(job_id, kind, targets, body.preserve_config),
+                     daemon=True).start()
+    st = _mass_state(job_id)
+    st["started"] = True
+    return st
+
+
+@app.post("/api/mass-update/{job_id}/cancel")
+def api_mass_update_cancel(job_id: int, _adm: dict = Depends(require_admin)):
+    """Massen-Update abbrechen: der laufende Router wird zu Ende geführt,
+    die übrigen werden nicht mehr angefasst."""
+    with _MASS_LOCK:
+        m = _MASS.get(job_id)
+        if not m:
+            raise HTTPException(404, "Massen-Update-Job nicht (mehr) im Speicher")
+        m["cancel"] = True
+        running = m["running"]
+    _mass_log(job_id, "Abbruch angefordert - Job läuft nach diesem Router aus")
+    return {"cancelled": True, "was_running": running}
+
+
+@app.get("/api/mass-update/{job_id}/status")
+def api_mass_update_status(job_id: int, _u: dict = Depends(auth)):
+    st = _mass_state(job_id)
+    if not st:
+        raise HTTPException(404, "Massen-Update-Job nicht (mehr) im Speicher")
+    return st
+
+
+@app.post("/api/devices/{device_id}/packages/reinstall")
+def api_pkg_reinstall(device_id: int, _u: dict = Depends(auth)):
+    """Installierte Pakete nach einem Firmware-Update explizit neu installieren.
+
+    Nutzt den zuletzt gespeicherten Paket-Baseline-Snapshot (pkg_restore) und
+    startet den Restore sofort; existiert kein Baseline, wird der aktuelle
+    Paketstand als Baseline gesichert, damit er nach dem naechsten Flash
+    wiederhergestellt werden kann."""
+    row = _device_or_404(device_id)
+    _ssh_only(row)
+    info = db.get_device_info(device_id) or {}
+    pr = info.get("pkg_restore")
+    if not isinstance(pr, dict) or not [n for n in (pr.get("names") or []) if n]:
+        dev = scheduler.make_device(row)
+        if not dev.is_online():
+            db.upsert_online(device_id, False)
+            raise HTTPException(502, "Router nicht erreichbar")
+        db.upsert_online(device_id, True)
+        snap = updater.snapshot_packages(device_id, dev)
+        names = snap.get("names") or []
+        if not names:
+            raise HTTPException(
+                502, "Aktueller Paketstand nicht ermittelbar – "
+                     "opkg list-installed lieferte nichts")
+        return {"baselined": True, "packages": len(names),
+                "message": "Paketstand als Baseline gesichert – nach dem "
+                           "nächsten Firmware-Update erneut antippen."}
+    pr["pending"] = True
+    pr.pop("status", None)
+    info["pkg_restore"] = pr
+    db.upsert_device_info(device_id, json.dumps(info))
+    updater.ensure_restore(device_id)
+    return {"started": True, "packages": len(pr.get("names") or [])}
 
 
 # ------------------------------------------------------------- backups
@@ -1183,6 +1609,21 @@ def api_all_clients(_u: dict = Depends(auth)):
 
 
 # ------------------------------------------------------------- LLDP / topology
+def _is_direct_iface(iface: str | None) -> bool:
+    """True, wenn ein LLDP-Nachbar auf einem PHYSIKALISCHEN Port gelernt wurde.
+
+    Nachbarn, die auf einer Bruecke (``br-lan``, ``br-lan.1`` …) gesehen werden,
+    haengen nicht direkt physisch an diesem Geraet — sie teilen sich nur
+    dasselbe logische L2-Segment (flat gebridgeutes LAN). Echte Punkt-zu-Punkt-
+    Links laufen ueber Switch-Ports ("Port 4", "eth0", Port-Nummern)."""
+    i = (iface or "").strip().lower()
+    if not i or i in ("lo", "?", "unknown"):
+        return False
+    if i == "br" or i.startswith("br-") or i.startswith("bridge"):
+        return False
+    return True
+
+
 def _lldp_node(device_id: int, row: dict) -> dict:
     """Lokales Chassis + Nachbarn eines Geräts für die Topologieansicht."""
     local = db.lldp_local(device_id) or {}
@@ -1196,8 +1637,16 @@ def _lldp_node(device_id: int, row: dict) -> dict:
         m = (db.lldp_local(d["id"]) or {}).get("mac") or ""
         if m:
             by_mac[m.lower()] = d
+    # Robuster Anker: LLDP-Mgmt-IP == Geräte-IP (ohne Port) -> bekanntes Gerät.
+    # Löst z. B. "router01.jay-net.intra" (192.168.1.1) auf den pfsense auf.
+    by_mgmt = {}
+    for d in known:
+        ip = (d.get("ip") or "").split(":")[0].strip()
+        if ip:
+            by_mgmt.setdefault(ip, d)
     for n in neighbors:
         n["local_port"] = n.get("iface") or ""
+        n["direct"] = _is_direct_iface(n.get("iface"))
         n["neighbor_port"] = n.get("port_id") or n.get("port_descr") or ""
         peer = None
         label = (n.get("neighbor_name") or "").strip().lower()
@@ -1205,18 +1654,35 @@ def _lldp_node(device_id: int, row: dict) -> dict:
             peer = by_name.get(label)
         if not peer and n.get("mac"):
             peer = by_mac.get(n["mac"].lower())
+        if not peer:
+            mip = (n.get("mgmt_ip") or "").strip()
+            if mip and mip in by_mgmt:
+                peer = by_mgmt[mip]
         n["peer_device_id"] = peer["id"] if peer else None
         n["is_known"] = bool(peer)
         n["peer_name"] = peer["name"] if peer else (
             n.get("neighbor_name") or n.get("hostname") or n.get("mgmt_ip") or "unbekannt")
+    web_only = _is_web_only(row)
+    # Web-Interface-Geräte (pfSense/HP) werden nie per Router-SSH gepollt.
+    # Ein früher gespeicherter LLDP-Fehler (z. B. "Error reading SSH protocol
+    # banner") ist ein Alt-Artefakt und darf nicht als aktueller Zustand
+    # erscheinen — sonst suggeriert die Topologie einen nicht existenten Fehler.
+    lldpd = local.get("lldpd") or "unknown"
+    err = local.get("error") or ""
+    if web_only:
+        if lldpd in ("error", "unknown"):
+            lldpd = "web"
+        err = ""
     return {
         "device_id": device_id,
         "name": row.get("name", ""),
         "ip": row.get("ip", ""),
+        "kind": row.get("kind") or "openwrt",
+        "web_managed": web_only,
         "state": row.get("state", "unknown"),
-        "lldpd": local.get("lldpd") or "unknown",
+        "lldpd": lldpd,
         "version": local.get("version") or "",
-        "error": local.get("error") or "",
+        "error": err,
         "local": {
             "chassis_id": local.get("chassis_id") or "",
             "mac": local.get("mac") or "",
