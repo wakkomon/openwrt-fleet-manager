@@ -46,6 +46,13 @@ th .arrow { font-size:10px }
 .pill.cur { background:rgba(61,220,132,.15); color:var(--ok) }
 .pill.err { background:rgba(255,93,93,.15); color:var(--err) }
 .pill.info { background:rgba(77,163,255,.15); color:var(--acc) }
+.mchip { display:inline-block; border-radius:9px; padding:2px 9px; font-size:12px;
+         background:#0d1219; border:1px solid var(--line); color:var(--dim) }
+.mchip.ok { background:rgba(61,220,132,.15); color:var(--ok) }
+.mchip.error { background:rgba(255,93,93,.15); color:var(--err) }
+.mchip.running { background:rgba(255,176,32,.15); color:var(--warn) }
+.mchip.skipped, .mchip.cancelled { background:rgba(143,162,181,.12); color:var(--dim);
+         text-decoration:line-through }
 .mono { font-family:ui-monospace,monospace; font-size:12px }
 .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center }
 .log { background:#0b0f15; border:1px solid var(--line); border-radius:6px; padding:10px;
@@ -163,9 +170,20 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
   <div id="tab-router" style="display:none">
     <div class="card">
       <h2>Routers</h2>
+      <div class="row" id="massBar" data-admin
+           style="margin:0 0 12px;flex-wrap:wrap;gap:10px;align-items:center">
+        <span class="badge" id="massSelInfo">0 Router ausgewählt</span>
+        <button class="btn small" onclick="startMass('packages')"
+                title="opkg/apk upgrade auf allen angehakten Routern – einer nach dem anderen">Pakete aktualisieren</button>
+        <button class="btn small warn" onclick="startMass('firmware')"
+                title="Firmware flashen (sysupgrade + Neustart) – einer nach dem anderen">Firmware flashen</button>
+        <label style="margin:0;display:flex;align-items:center;gap:6px"><input type="checkbox" id="massPreserve" checked style="width:auto"> Firmware: Konfiguration erhalten</label>
+        <span class="hint">Anhaken links in der Tabelle; ein Router nach dem anderen.</span>
+      </div>
+      <div id="massProg" style="display:none"></div>
       <table id="devTable">
         <thead><tr>
-          <th style="width:30px" title="Für „Zentrale Konfiguration“ wählen"><input type="checkbox" id="ckAll" style="width:auto" onclick="toggleAllDev(this.checked)" title="Alle wählen"></th>
+          <th style="width:30px" title="Für Massen-Update und zentrale Konfiguration wählen"><input type="checkbox" id="ckAll" style="width:auto" onclick="toggleAllDev(this.checked)" title="Alle wählen"></th>
           <th class="sortable" onclick="setSort('status')">Status <span class="arrow" id="ar-status"></span></th>
           <th class="sortable" onclick="setSort('name')">Name / IP <span class="arrow" id="ar-name"></span></th>
           <th>Modell / Board</th>
@@ -262,6 +280,12 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
         Automatisch alle 2 min. <b>↻ aktualisieren</b> pollt sofort neu.
         <span class="row" style="margin-left:10px">
           <button class="btn small ghost" onclick="loadTopology(true)">↻ aktualisieren</button>
+          <label style="margin:0 0 0 12px;display:inline-flex;align-items:center;gap:6px"
+                 title="Ausgeblendet: Nachbarn, die nur über eine Brücke (br-lan) im selben L2-Segment gesehen werden — keine echte Leitung.">
+            <input type="checkbox" id="topoDirect" checked style="width:auto"
+                   onchange="_topoDirectOnly=this.checked;drawTopology()">
+            nur direkte Verbindungen
+          </label>
         </span>
       </div>
       <div class="topo-wrap">
@@ -330,16 +354,18 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
         <div class="grid2">
           <div><label>Name</label><input id="eName"></div>
           <div><label>IP / Host</label><input id="eIp"></div>
-          <div id="eSshPortDiv"><label>SSH-Port</label><input id="ePort"></div>
-          <div id="eSshUserDiv"><label>SSH-User</label><input id="eUser"></div>
+          <div id="eSshPortDiv"><label id="ePortLbl">SSH-Port</label><input id="ePort"></div>
+          <div id="eSshUserDiv"><label id="eUserLbl">SSH-User</label><input id="eUser"></div>
         </div>
         <label>Geräte-Typ</label>
         <select id="eKind">
           <option value="openwrt">OpenWRT-Router (SSH)</option>
+          <option value="unifi">UniFi Switch (SSH/swctrl)</option>
+          <option value="pfsense">pfSense (WebUI)</option>
           <option value="hp1810">HP 1810 (Web-Interface)</option>
         </select>
         <div id="eSshCred">
-        <label>SSH-Passwort (******** = behalten)</label><input id="ePass" type="password">
+        <label id="ePassLbl">SSH-Passwort (******** = behalten)</label><input id="ePass" type="password">
         <label>Login-Art</label>
         <select id="eMode" onchange="document.getElementById('eKeyRow').style.display=this.value==='key'?'':'none'">
           <option value="password">Passwort</option><option value="key">Privater SSH-Key</option>
@@ -363,6 +389,7 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
       <button class="btn small" onclick="devSurvey(currentDev)">↻ Jetzt scannen</button>
       <button class="btn small ghost" onclick="devRename(currentDev)">✎ Umbenennen</button>
       <button class="btn small danger" id="dRebootBtn" onclick="devReboot(currentDev)">⟳ Router neu starten</button>
+      <button class="btn small danger" id="dDelBtn" data-admin onclick="delDev(currentDev)">🗑 Gerät löschen</button>
       <span class="hint" id="dActMsg"></span>
     </div>
     <div id="dHpNote" class="hint" style="display:none;margin:-6px 0 12px">
@@ -398,8 +425,14 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
       </div>
     </div>
 
+    <div class="row" id="dTabs" style="margin-top:14px;gap:6px">
+      <button class="btn small" id="dTabBtnInfo" onclick="devTab('info')">Details</button>
+      <button class="btn small ghost" id="dTabBtnUpd" onclick="devTab('upd')">Updates</button>
+      <button class="btn small ghost" id="dTabBtnCfg" onclick="devTab('cfg')">Konfiguration</button>
+    </div>
+
     <div class="grid2" id="dSshCols" style="margin-top:14px">
-      <div>
+      <div id="dColUpd" style="display:none">
         <h2>Firmware</h2>
         <div class="row">
           <button class="btn small" onclick="fwCheck(currentDev)">Prüfen</button>
@@ -416,13 +449,16 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
         <div class="row" style="margin-top:10px">
           <button class="btn small" id="dPkgUpBtn" onclick="pkgUpdate(currentDev,false)">⬆ Paket-Updates durchführen</button>
           <button class="btn small ghost" id="dPkgSelBtn" onclick="pkgUpdate(currentDev,true)">Nur ausgewählte</button>
+          <button class="btn small ghost" id="dPkgReinstallBtn" onclick="pkgReinstall(currentDev)"
+                  title="Nach einem Firmware-Update: gespeicherte Paket-Liste erneut installieren (fehlende Pakete werden nachinstalliert)">Pakete wiederherstellen</button>
         </div>
+        <div id="dPkgRestore" class="hint" style="margin-top:6px"></div>
         <div id="dPkgSel" style="display:none;margin-top:8px"></div>
         <div class="hint" style="margin-top:6px">Hinweis: Pakete wie <b>luci</b> brauchen nach dem Update einen Neustart der Router-UI; die Konfiguration bleibt erhalten.</div>
         <div id="dPkgLog" style="margin-top:10px" class="log" hidden></div>
         <div id="dFwLog" style="margin-top:10px" class="log" hidden></div>
       </div>
-      <div>
+      <div id="dColCfg" style="display:none">
         <h2>Konfiguration</h2>
         <div class="row">
           <button class="btn small" onclick="cfgBackup(currentDev)">Sicherung anlegen</button>
@@ -449,16 +485,18 @@ tr.detail td { background:#0a0f16; border-top:1px dashed var(--line); padding:8p
     <label>Name</label><input id="aName" placeholder="z. B. Archer C7 (WG)">
     <label>IP / Host</label><input id="aIp" placeholder="192.168.1.94">
     <label>Geräte-Typ</label>
-    <select id="aKind" onchange="document.getElementById('aKindHint').style.display=this.value==='hp1810'?'':'none'">
+    <select id="aKind" onchange="document.getElementById('aKindHint').style.display=(this.value==='hp1810'||this.value==='pfsense')?'':'none';document.getElementById('aKindHint').textContent=this.value==='pfsense'?'pfSense: Verwaltung über die WebUI (Port 443/80, User admin). Status, Neustart und DHCP-Leases kommen von dort; kein SSH-Update/Paket-Restore.':'HP 1810-24G: LLDP/MAC-Tabelle per Web-Interface, kein SSH/Reboot.';kindLbl('a',this.value)">
       <option value="openwrt">OpenWRT-Router (SSH)</option>
+      <option value="unifi">UniFi Switch (SSH/swctrl)</option>
+      <option value="pfsense">pfSense (WebUI)</option>
       <option value="hp1810">HP 1810 (Web-Interface)</option>
     </select>
     <div id="aKindHint" style="display:none" class="hint">HP 1810-24G: LLDP/MAC-Tabelle per Web-Interface, kein SSH/Reboot.</div>
     <div class="grid2">
-      <div><label>SSH-Port</label><input id="aPort" value="22"></div>
-      <div><label>SSH-User</label><input id="aUser" value="root"></div>
+      <div><label id="aPortLbl">SSH-Port</label><input id="aPort" value="22"></div>
+      <div><label id="aUserLbl">SSH-User</label><input id="aUser" value="root"></div>
     </div>
-    <label>SSH-Passwort</label><input id="aPass" type="password" placeholder="OpenWRT-Root-Passwort">
+    <label id="aPassLbl">SSH-Passwort</label><input id="aPass" type="password" placeholder="OpenWRT-Root-Passwort">
     <label>Login-Art</label>
     <select id="aMode" onchange="document.getElementById('aKeyRow').style.display=this.value==='key'?'':'none'">
       <option value="password">Passwort</option>
@@ -604,22 +642,22 @@ function renderDevices(){
   $('#devTable tbody').innerHTML=rows.map(d=>{
     const st=d.status; const on=st&&st[0]===1; const info=d.info||{};
     const hp=d.kind==='hp1810';
+    const web=hp||d.kind==='pfsense';
+    const kindPill=d.kind==='pfsense'?' <span class="pill info" title="Verwaltung über die WebUI">pfSense</span>':(d.kind==='unifi'?' <span class="pill info">UniFi</span>':(hp?' <span class="pill info" title="kein SSH – Web-Interface">Web</span>':''));
     return `<tr>
-      <td>${hp?'<span class="hint">—</span>':`<input type="checkbox" class="devCk" data-id="${d.id}" ${centralSel.has(d.id)?'checked':''} style="width:auto" onchange="toggleDevSel(${d.id},this.checked)">`}</td>
+      <td>${web?'<span class="hint">—</span>':`<input type="checkbox" class="devCk" data-id="${d.id}" ${centralSel.has(d.id)?'checked':''} style="width:auto" onchange="toggleDevSel(${d.id},this.checked)">`}</td>
       <td><span class="dot ${on?'on':'off'}"></span>${fmtTime(st&&st[1])}</td>
-      <td><b>${esc(d.name)}</b> ${authPill(d)}${hp?' <span class="pill info" title="kein SSH – Web-Interface">Web</span>':''}<br><span class="hint mono">${esc(d.ip)}</span></td>
+      <td><b>${esc(d.name)}</b> ${authPill(d)}${kindPill}<br><span class="hint mono">${esc(d.ip)}</span></td>
       <td>${esc(info.model||'')} <span class="hint mono">${esc(info.target||'')}</span></td>
       <td class="mono">${esc(info.version||'—')}</td>
       <td>${hp?'—':fmtUptime(info.uptime_s)}</td>
       <td class="mono">${info.rx_bps!=null?esc(fmtBps(info.rx_bps))+' / '+esc(fmtBps(info.tx_bps)):'—'}</td>
-      <td>${hp?'—':fwPill(d)}</td>
-      <td>${hp?'—':pkgPill(d)}</td>
+      <td>${web?'—':fwPill(d)}</td>
+      <td>${web?'—':pkgPill(d)}</td>
       <td>${d.clients.lan} LAN${hp?'':' · '+d.clients.wlan+' WLAN'}</td>
       <td class="row">
         <button class="btn small ghost" onclick="openDev(${d.id})">Details</button>
-        <button class="btn small ghost" onclick="checkStatus(${d.id})">Status</button>
-        ${hp?'':`<button class="btn small danger" onclick="devReboot(${d.id},true)">⟳</button>`}
-        <button class="btn small warn" onclick="if(confirm('Router entfernen?'))delDev(${d.id})">Löschen</button>
+        <button class="btn small ghost" title="Status sofort neu einlesen" onclick="checkStatus(${d.id},this)">&#8635;</button>
       </td></tr>`;
   }).join('')||'<tr><td colspan="11" class="hint">Keine Router – „+ Router“ oben rechts.</td></tr>';
   syncCkAll();
@@ -628,7 +666,90 @@ function renderDevices(){
 const centralSel=new Set();
 function toggleDevSel(id,checked){ if(checked) centralSel.add(id); else centralSel.delete(id); syncCkAll(); }
 function toggleAllDev(on){ centralSel.clear(); if(on) devices.forEach(d=>{ if(d.kind!=='hp1810') centralSel.add(d.id); }); renderDevices(); }
-function syncCkAll(){ const ck=$('#ckAll'); if(!ck) return; const sel=devices.filter(d=>d.kind!=='hp1810'); const n=sel.filter(d=>centralSel.has(d.id)).length; ck.checked=n>0&&n===sel.length; ck.indeterminate=n>0&&n<sel.length; }
+function syncCkAll(){ const ck=$('#ckAll'); if(!ck) return; const sel=devices.filter(d=>d.kind!=='hp1810'); const n=sel.filter(d=>centralSel.has(d.id)).length; ck.checked=n>0&&n===sel.length; ck.indeterminate=n>0&&n<sel.length; massInfo(); }
+
+/* ---------- Massen-Update: Haken links in der Router-Tabelle ----------
+   Ein Job (Backend /api/mass-update/<kind>) arbeitet die Router der Reihe nach
+   ab. Das Panel hängt am selben Tab, damit die Tabelle sichtbar bleibt; ist
+   der Job fertig, wird der Status der Router sofort neu geladen. */
+let massJob=null, massTimer=null, massDone=-1;
+function massSel(){ return devices.filter(d=>centralSel.has(d.id)); }
+function massInfo(){
+  const el=$('#massSelInfo'); if(!el) return;
+  const n=massSel().length;
+  el.textContent=n?(n+' Router ausgewählt'):'Kein Router ausgewählt';
+  const busy=!!(massJob&&massJob.running);
+  document.querySelectorAll('#massBar button').forEach(b=>b.disabled=!n||busy);
+}
+async function startMass(kind){
+  const sel=massSel();
+  if(!sel.length){ alert('Bitte zuerst links in der Router-Tabelle häkchen.'); return; }
+  const what = kind==='packages' ? 'Paket-Updates (opkg/apk upgrade)'
+                                 : 'Firmware-Flash (sysupgrade + Neustart)';
+  if(!confirm(what+' auf '+sel.length+' Router:\n'+sel.map(d=>d.name).join(', ')+
+              '\n\nEiner nach dem anderen.'+(kind==='firmware'?' Jeder Router startet dafür neu.':''))) return;
+  const r=await api('/api/mass-update/'+kind,{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({device_ids:sel.map(d=>d.id),
+      preserve_config: kind==='firmware' ? !!$('#massPreserve').checked : true})});
+  if(!r) return;
+  if(r.error){ alert('Massen-Update nicht gestartet: '+r.error); return; }
+  if(!r.started){ alert(r.note||'Keiner der gewählten Router ist für diese Aktion geeignet.'); return; }
+  massJob={id:r.id,kind:r.kind,running:r.running,total:r.total,done:0,items:r.items,output:''};
+  massDone=-1; renderMassPanel(); massInfo();
+  clearInterval(massTimer); massTimer=setInterval(pollMass,2500);
+  await pollMass();
+}
+async function pollMass(){
+  if(!massJob) return;
+  const st=await api('/api/mass-update/'+massJob.id+'/status');
+  if(!st||st.id==null) return;                 // Job nicht mehr im Speicher
+  massJob=st; renderMassPanel(); massInfo();
+  if(st.done!==massDone){ massDone=st.done; refreshAll(); }   // Pillen live nachziehen
+  if(!st.running){
+    clearInterval(massTimer); massTimer=null;
+    refreshAll(); refreshUpdateJobs();         // Fertig: Status + Update-Jobs neu laden
+  }
+}
+async function cancelMass(){
+  if(!massJob) return;
+  if(!confirm('Massen-Update abbrechen?\nDer Router an der Reihe wird fertig, die übrigen werden übersprungen.')) return;
+  await api('/api/mass-update/'+massJob.id+'/cancel',{method:'POST'});
+  await pollMass();
+}
+function hideMassPanel(){
+  clearInterval(massTimer); massTimer=null; massDone=-1;
+  const b=$('#massProg'); if(b){ b.style.display='none'; b.innerHTML=''; }
+  massInfo();
+}
+function renderMassPanel(){
+  const box=$('#massProg'); if(!box||!massJob) return;
+  const st=massJob, busy=!!st.running;
+  const label = st.kind==='packages' ? 'Paket' : 'Firmware';
+  const chips=(st.items||[]).map(it=>{
+    const d=devices.find(x=>x.id===it.device_id)||{};
+    const bits=[it.current, it.error,
+                it.after!=null?(it.before+' → '+it.after+' Pakete offen'):null].filter(Boolean);
+    return '<span class="mchip '+esc(it.state||'queued')+'" title="'+esc((d.name||('#'+it.device_id))+(bits.length?(' · '+bits.join(' · ')):''))+'">'+esc(d.name||('#'+it.device_id))+'</span>';
+  }).join('');
+  box.style.display='';
+  box.innerHTML='<div class="card" style="border-left:3px solid '+(busy?'var(--warn)':'var(--acc)')+'">'
+    +'<div class="row" style="justify-content:space-between;align-items:center">'
+      +'<h2 style="margin:0">Massen-'+label+'-Update '+(busy?'läuft':'beendet')+' ('+(st.done||0)+'/'+(st.total||0)+')'+(st.finished?' · seit '+esc(st.finished):'')+'</h2>'
+      +'<div class="row">'+(busy?'<button class="btn small danger" onclick="cancelMass()">Abbrechen</button>':'')
+      +' <button class="btn small ghost" onclick="hideMassPanel()">schließen</button></div></div>'
+    +'<div class="row" style="flex-wrap:wrap;gap:6px;margin:10px 0 8px">'+chips+'</div>'
+    +'<pre class="log mono" id="massLogBox" style="max-height:260px;overflow:auto;white-space:pre-wrap;margin:0">'+esc(st.output||'—')+'</pre>'
+    +'<p class="hint" style="margin:8px 0 0">'+(busy?'Abbruch wirkt zwischen den Routern – der laufende Router wird nicht mitten im Befehl getrennt.':'Tabelle und Update-Jobs wurden neu geladen; jeder Router hat seinen frischen Status.')+'</p>'
+    +'</div>';
+  const lg=$('#massLogBox'); if(lg) lg.scrollTop=lg.scrollHeight;
+}
+async function resumeMass(){
+  if(massJob) return;
+  const a=await api('/api/mass-update/active');
+  if(a&&a.id&&a.running){ massJob=a; renderMassPanel(); massInfo();
+    clearInterval(massTimer); massTimer=setInterval(pollMass,2500); }
+}
 function authPill(d){
   let h='';
   if(d.auth_mode==='key') h+=' <span class="pill info">Key</span>';
@@ -648,8 +769,18 @@ function pkgPill(d){
   if(p.count) return `<span class="pill upd" title="${esc((p.packages||[]).join(', '))} · ${esc(p.pkgman||'')}">⬆ ${p.count} Update${p.count>1?'s':''}</span>`;
   return `<span class="pill cur" title="${esc(p.pkgman||'')}">aktuell</span>`;
 }
-async function checkStatus(id){ await api(`/api/devices/${id}/status`,{method:'POST'}); refreshAll(); }
-async function delDev(id){ await api(`/api/devices/${id}`,{method:'DELETE'}); refreshAll(); }
+async function checkStatus(id,btn){
+  if(btn){btn.disabled=true;btn.textContent='…';}
+  await api(`/api/devices/${id}/status`,{method:'POST'});
+  if(btn){btn.disabled=false;btn.innerHTML='&#8635;';}
+  refreshAll();
+}
+async function delDev(id){
+  const d=devices.find(x=>x.id===id)||{};
+  if(!confirm(`Gerät "${d.name||id}" (${d.ip||'?'}) wirklich löschen?\nAlle Historie, Clients und Backups des Eintrags werden entfernt.`))return;
+  const r=await api(`/api/devices/${id}`,{method:'DELETE'});
+  if(r){ if(currentDev===id) closeDev(); refreshAll(); }
+}
 
 /* ---------- add device / bulk ---------- */
 function showAddDevice(){$('#aModal').style.display='block';
@@ -715,17 +846,22 @@ async function openDev(id){
   currentDev=id; detailOpen=true;
   const d=devices.find(x=>x.id===id)||{name:'#'+id};
   const hp=d.kind==='hp1810';
+  const web=hp||d.kind==='pfsense';
   $('#dTitle').textContent='Details: '+d.name;
   $('#dActMsg').textContent='';
   $('#dPkgLog').hidden=true; $('#dPkgLog').textContent='';
   $('#dPkgUpBtn').disabled=false;
   $('#dHpNote').style.display=hp?'':'none';
   $('#dRebootBtn').style.display=hp?'none':'';
-  $('#dSshCols').style.display=hp?'none':'';
-  $('#dWlanCol').style.display=hp?'none':'';
-  $('#dClientCols').querySelector('h2').textContent=hp?'Geräte an Ports (MAC-Tabelle)':'LAN-Geräte';
+  $('#dSshCols').style.display=web?'none':'';
+  $('#dTabs').style.display=web?'none':'';
+  devTab('info');
+  const ui=d.kind==='unifi';
+  $('#dWlanCol').style.display=(hp||ui)?'none':'';
+  $('#dClientCols').querySelector('h2').textContent=hp?'Geräte an Ports (MAC-Tabelle)':(ui?'MAC-Tabelle (FDB, Ports)':'LAN-Geräte');
   $('#dModal').style.display='block';
   renderDevInfoBar(id);
+  pkgRestoreStatus(id);
   // once per open: refresh info+clients from the router, then re-render (no re-open)
   clearTimeout(pendingRefresh);
   pendingRefresh=setTimeout(async()=>{
@@ -740,6 +876,37 @@ async function openDev(id){
 }
 function closeDev(){ $('#dModal').style.display='none'; currentDev=null; detailOpen=false;
   clearTimeout(pendingRefresh); }
+function devTab(t){
+  const on=(sel,vis)=>{const e=$(sel);if(e)e.style.display=vis?'':'none';};
+  const btn=(sel,active)=>{const e=$(sel);if(e)e.className='btn small'+(active?'':' ghost');};
+  on('#dColUpd',t==='upd'); on('#dColCfg',t==='cfg');
+  btn('#dTabBtnInfo',t==='info'); btn('#dTabBtnUpd',t==='upd'); btn('#dTabBtnCfg',t==='cfg');
+}
+function pkgRestoreStatus(id){
+  const el=$('#dPkgRestore'); if(!el)return;
+  const pr=((devices.find(x=>x.id===id)||{}).info||{}).pkg_restore;
+  if(!pr||!(pr.names||[]).length){el.textContent='';return;}
+  const n=pr.names.length;
+  el.textContent = pr.pending ? `⏳ Paket-Wiederherstellung ausstehend: ${n} Pakete werden nach dem nächsten Kontakt automatisch installiert.`
+    : pr.status==='error' ? `❌ Paket-Wiederherstellung fehlgeschlagen (${n} Pakete) – Button "Pakete wiederherstellen" erneut nutzen.`
+    : `📦 Paket-Baseline gespeichert: ${n} Pakete${pr.status==='done'?' – letzte Wiederherstellung abgeschlossen':''}.`;
+}
+async function pkgReinstall(id){
+  if(!confirm('Alle gespeicherten Pakete laut Baseline erneut installieren?\nBereits installierte Pakete bleiben unverändert, fehlende werden nachinstalliert.'))return;
+  const btn=$('#dPkgReinstallBtn'); if(btn)btn.disabled=true;
+  const r=await api(`/api/devices/${id}/packages/reinstall`,{method:'POST'});
+  if(btn)btn.disabled=false;
+  if(!r)return;
+  if(r.baselined){ $('#dActMsg').textContent=r.message||'Paketstand als Baseline gesichert'; pkgRestoreStatus(id); return; }
+  $('#dActMsg').textContent=`Wiederherstellung gestartet (${r.packages} Pakete) …`;
+  await refreshAll(); pkgRestoreStatus(id);
+  const t=setInterval(async()=>{
+    if(!detailOpen||currentDev!==id){clearInterval(t);return;}
+    await refreshAll(); pkgRestoreStatus(id);
+    const pr=((devices.find(x=>x.id===id)||{}).info||{}).pkg_restore||{};
+    if(!pr.pending&&pr.status){clearInterval(t);$('#dActMsg').textContent='Paket-Wiederherstellung: '+(pr.status==='done'?'abgeschlossen.':('fehlgeschlagen – Details im Aktions-Log.'));}
+  },5000);
+}
 function renderDevInfoBar(id){
   const d=devices.find(x=>x.id===id)||{}; const info=d.info||{};
   $('#dTitle').textContent='Details: '+(d.name||('#'+id));
@@ -749,8 +916,17 @@ function renderDevInfoBar(id){
     if(info.lldp_neighbors!=null) extra.push(['LLDP-Nachbarn',info.lldp_neighbors]);
     if(info.fdb_entries!=null) extra.push(['MAC-Tabelle',info.fdb_entries]);
   }
+  if(d.kind==='pfsense'){
+    extra.push(['Verwaltung','pfSense WebUI']);
+  }
+  if(d.kind==='unifi'){
+    extra.push(['Verwaltung','SSH · swctrl']);
+    if(info.model) extra.push(['UniFi-Modell',info.model]);
+  }
+  // Fehlergrund (z. B. pfSense-Login abgelehnt, Web nicht erreichbar)
+  if(info.error) extra.push(['Fehler',info.error]);
   $('#dInfo').innerHTML=[
-    ['IP',info.ip||d.ip],['Modell/Board',info.model||''],['OpenWrt',info.version||''],
+    ['IP',info.ip||d.ip],['Modell/Board',info.model||''],['Version',info.version||''],
     ['Ziel',info.target||''],['Arch',info.arch||''],['Uptime',fmtUptime(info.uptime_s)],
     ['Last ↓/↑',(info.rx_bps!=null?fmtBps(info.rx_bps)+' / '+fmtBps(info.tx_bps):'')],
     ['Stand',fmtTime(info.refreshed_at)]]
@@ -789,9 +965,18 @@ async function devRename(id){
   refreshAll(); if(detailOpen&&currentDev)renderDevInfoBar(currentDev);
 }
 async function renderClients(id){
+  const dd=devices.find(x=>x.id===id)||{};
+  const uiK=dd.kind==='unifi', hpK=dd.kind==='hp1810';
+  if(hpK||uiK){
+    const ths=$('#dLan').closest('table').querySelectorAll('thead th');
+    if(ths.length===4){ ths[3].textContent=uiK?'Port':'IF'; }
+  }
   api(`/api/devices/${id}/clients?kind=lan`).then(l=>{
     if(currentDev!==id)return;
-    $('#dLan').innerHTML=(l||[]).map(c=>`<tr><td class="mono">${esc(c.ip)}</td><td class="mono">${esc(c.mac)}</td><td>${esc(c.hostname)}</td><td class="mono">${esc(c.iface)}</td></tr>`).join('')||'<tr><td colspan="4" class="hint">keine Einträge (ARP leer?)</td></tr>';
+    $('#dLan').innerHTML=(l||[]).map(c=>`<tr><td class="mono">${esc(c.ip)}</td><td class="mono">${esc(c.mac)}</td><td>${esc(c.hostname)}</td><td class="mono">${esc(c.iface)}</td></tr>`).join('')
+      ||(uiK?'<tr><td colspan="4" class="hint">MAC-Tabelle leer (FDB noch nicht gefüllt?)</td></tr>'
+           :hpK?'<tr><td colspan="4" class="hint">keine Einträge</td></tr>'
+           :'<tr><td colspan="4" class="hint">keine Einträge (ARP leer?)</td></tr>');
     $('#dLanN').textContent=(l||[]).length;
   });
   api(`/api/devices/${id}/clients?kind=wlan`).then(w=>{
@@ -847,6 +1032,14 @@ async function loadHistory(id){
 }
 
 /* ---------- firmware (unchanged behaviour) ---------- */
+function kindLbl(prefix, k){
+  // WebUI-Geraete (pfsense/hp1810): keine SSH-Terminologie — Username/Passwort.
+  // UniFi ist SSH, bleibt bei SSH-User/-Passwort, Port heisst 'Port'.
+  const t=(id,v)=>{const e=$(id); if(e) e.textContent=v;};
+  t('#'+prefix+'PortLbl', (k==='hp1810'||k==='pfsense')?'Port':(k==='unifi'?'Port':'SSH-Port'));
+  t('#'+prefix+'UserLbl', (k==='hp1810'||k==='pfsense')?'Username':'SSH-User');
+  t('#'+prefix+'PassLbl', (k==='hp1810'||k==='pfsense')?'Passwort':'SSH-Passwort');
+}
 function renderFw(id){
   const d=devices.find(x=>x.id===id); const f=d&&d.firmware;
   const pk=(d&&d.info&&d.info.packages)||null;
@@ -1196,7 +1389,7 @@ function renderAllClients(){
 }
 
 /* ---------- topology (LLDP) ---------- */
-let _topoData=null, _topoSelected=null, _topoView={x:0,y:0,scale:1}, _topoDrag=null, _topoPan=null;
+let _topoData=null, _topoSelected=null, _topoView={x:0,y:0,scale:1}, _topoDrag=null, _topoPan=null, _topoDirectOnly=true;
 const TOPO_W=900, TOPO_H=560;
 
 async function loadTopology(scanning){
@@ -1221,49 +1414,68 @@ function lldpStatusBadge(s){
   return '<span class="pill info">unbekannt</span>';
 }
 
-// Kreislayout: bekannte Geräte außen, unbekannte Nachbarn auf dem Ring zwischen den
-// verbundenen bekannten Geräten; isolierte bekannte Geräte gleichmäßig verteilt.
+// Layered-Layout: nur echte (direkte) Leitungen als Kanten; unbekannte Nachbarn
+// als eigene Knoten direkt an ihrer Quelle. Tiefe per BFS -> kaum Überlappungen.
 function layoutTopology(devs){
   const ids=devs.map(d=>d.device_id);
-  const knownSet=new Set(ids);
-  // Kanten zwischen bekannten Geräten sammeln
-  const edgeSet={}; // key a|b (a<b) -> {a,b,count}
-  const unknowns=[]; // {srcId, mac, name, port}
+  const edgeSet={};          // key a|b (a<b) -> {a,b,count}
+  const unknownMap={};       // mac|name -> {key,srcId,mac,name,port}
+  const deg={}; ids.forEach(id=>deg[id]=0);
   devs.forEach(d=>{
     (d.neighbors||[]).forEach(n=>{
+      // Nur direkte Verbindungen: Nachbarn, die rein über eine Brücke (br-lan)
+      // im selben L2-Segment erscheinen, sind keine echte Leitung -> ausblenden.
+      if(_topoDirectOnly && n.direct===false) return;
       if(n.peer_device_id!=null){
         const a=Math.min(d.device_id,n.peer_device_id), b=Math.max(d.device_id,n.peer_device_id);
-        if(a===b)return;
+        if(a===b) return;
         const key=a+'|'+b;
         edgeSet[key]=edgeSet[key]||{a,b,count:0};
         edgeSet[key].count++;
+        deg[a]++; deg[b]++;
       }else{
-        unknowns.push({srcId:d.device_id, mac:n.mac||'', name:n.neighbor_name||n.hostname||n.mgmt_ip||'unbekannt', port:n.local_port||''});
+        const k=(n.mac||('name:'+(n.neighbor_name||n.mgmt_ip)));
+        if(!unknownMap[k]) unknownMap[k]={
+          key:'u'+Object.keys(unknownMap).length, srcId:d.device_id,
+          mac:n.mac||'', name:n.neighbor_name||n.hostname||n.mgmt_ip||'unbekannt',
+          port:n.local_port||''};
       }
     });
   });
-  // Platzierung: bekannte Geräte auf einem Kreis, unbekannte zwischen ihren Anbindungen
-  const R=Math.min(TOPO_W,TOPO_H)/2-70, cx=TOPO_W/2, cy=TOPO_H/2;
-  const pos={}; // id -> {x,y}
-  const N=devs.length;
-  devs.forEach((d,i)=>{
-    const ang=(-Math.PI/2)+i*(2*Math.PI/Math.max(N,1));
-    pos[d.device_id]={x:cx+R*Math.cos(ang), y:cy+R*Math.sin(ang)};
-  });
-  // Unbekannte Geräte auf den Ring zwischen src und Mittelpunkt schieben (leicht außen)
-  unknowns.forEach(u=>{
-    const p=pos[u.srcId]; if(!p)return;
-    const dx=p.x-cx, dy=p.y-cy, len=Math.hypot(dx,dy)||1;
-    const off=46+ (u.name.length%3)*6; // leichte Variation
-    pos['u:'+u.srcId+':'+(u.mac||u.name)]={
-      x: cx+(dx/len)*(R*0.5+off), y: cy+(dy/len)*(R*0.5+off),
-      _unknown:true, srcId:u.srcId, mac:u.mac, name:u.name, port:u.port
-    };
-  });
-  // Kanten neu als Liste
   const edges=Object.values(edgeSet).map(e=>({a:e.a,b:e.b,count:e.count}));
-  // unbekannte Kanten (src -> unknown node)
-  const uEdges=unknowns.map(u=>({a:u.srcId,b:'u:'+u.srcId+':'+(u.mac||u.name),unknown:true}));
+  // Layered Layout: BFS-Tiefe von den Knoten mit den meisten Kanten (Uplinks) aus.
+  const adj={}; ids.forEach(id=>adj[id]=[]);
+  edges.forEach(e=>{adj[e.a].push(e.b);adj[e.b].push(e.a);});
+  const depth={};
+  ids.slice().sort((x,y)=>deg[y]-deg[x]).forEach(r=>{
+    if(depth[r]!=null) return;
+    depth[r]=0; const q=[r];
+    while(q.length){const c=q.shift();adj[c].forEach(nb=>{if(depth[nb]==null){depth[nb]=depth[c]+1;q.push(nb);}});}
+  });
+  const layers={};
+  ids.forEach(id=>{const dv=depth[id]||0;(layers[dv]=layers[dv]||[]).push(id);});
+  const depths=Object.keys(layers).map(Number).sort((a,b)=>a-b);
+  const pos={};
+  const xg=depths.length>1?(TOPO_W-160)/(depths.length-1):0;
+  depths.forEach((dv,di)=>{
+    const col=layers[dv].slice().sort((a,b)=>deg[b]-deg[a]);
+    const yg=Math.min(130,(TOPO_H-120)/(col.length+1));
+    col.forEach((id,ci)=>{
+      pos[id]={x:depths.length>1?80+di*xg:TOPO_W/2,
+               y:(TOPO_H/2)+(ci-(col.length-1)/2)*yg};
+    });
+  });
+  // unbekannte Nachbarn: halbe Spalte rechts neben ihrer Quelle, gestapelt
+  const uEdges=[];
+  Object.values(unknownMap).forEach(u=>{
+    const p=pos[u.srcId]; if(!p) return;
+    const kids=Object.values(unknownMap).filter(x=>x.srcId===u.srcId);
+    const idx=kids.indexOf(u);
+    pos[u.key]={x:Math.min(TOPO_W-70,p.x+(xg?xg*0.5:70)+30),
+                y:p.y+idx*40-((kids.length-1)/2)*20,
+                _unknown:true, srcId:u.srcId, name:u.name, port:u.port};
+    uEdges.push({a:u.srcId,b:u.key,unknown:true,mac:u.mac,name:u.name,port:u.port});
+  });
   return {pos, edges, uEdges};
 }
 
@@ -1512,18 +1724,28 @@ function toggleEditAccess(){
   }
 }
 function applyKindToEdit(){
-  const hp=$('#eKind').value==='hp1810';
+  const k=$('#eKind').value;
+  const hp=k==='hp1810';
+  const web=hp||k==='pfsense';
   const show=(id,v)=>{const e=$(id); if(e) e.style.display=v?'':'none';};
-  show('#eSshPortDiv',!hp); show('#eSshUserDiv',!hp); show('#eSshCred',!hp);
-  if(hp){ $('#eMode').value='password'; $('#eKeyRow').style.display='none'; }
+  // Port-Feld immer sichtbar (bei Web-Typen = WebUI-Port, z. B. 443/4444);
+  // Labels wechseln per kindLbl auf Username/Passwort.
+  show('#eSshPortDiv',true); show('#eSshUserDiv',!hp); show('#eSshCred',!hp);
+  kindLbl('e',k);
+  if(web){ $('#eMode').value='password'; $('#eKeyRow').style.display='none'; }
   let h=$('#ePassHint');
-  if(hp&&!h){
+  if(h){ h.remove(); h=null; }
+  if(web){
     h=document.createElement('div'); h.id='ePassHint'; h.className='hint';
     h.style.margin='2px 0 8px';
-    h.innerHTML='HP 1810: <b>kein SSH</b> – Zugriff ausschließlich über das '
-      +'Web-Interface (Port 80). LLDP, MAC-Tabelle und Status kommen von dort.';
+    h.innerHTML = hp
+      ? 'HP 1810: <b>kein SSH</b> – Zugriff ausschließlich über das '
+        +'Web-Interface (Port 80). LLDP, MAC-Tabelle und Status kommen von dort.'
+      : 'pfSense: <b>Zugriff über die WebUI</b> (Port 443/80). Benutzer + Passwort oben = '
+        +'pfSense-Login (Standard: admin). Status, Neustart und DHCP-Leases kommen von der WebUI; '
+        +'SSH-Paket-Updates/-Restore sind für pfSense nicht verfügbar.';
     $('#eKind').after(h);
-  } else if(!hp&&h){ h.remove(); }
+  }
 }
 async function saveDeviceEdit(){
   const d=devices.find(x=>x.id===currentDev)||{};
@@ -1544,6 +1766,7 @@ loadMe();
 $('#appVer').textContent='v'+APP_VERSION;
 showTab('dashboard');
 refreshAll();
+resumeMass();
 setInterval(refreshAll,30000);
 window.addEventListener('resize',()=>{ if(detailOpen&&currentDev) loadHistory(currentDev); });
 </script>
