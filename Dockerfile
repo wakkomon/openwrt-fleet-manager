@@ -11,4 +11,4 @@ COPY app/ ./app/
 COPY static/ ./static/
 
 EXPOSE 8789
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8789"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8789", "--ssl-keyfile", "/certs/key.pem", "--ssl-certfile", "/certs/cert.pem"]
