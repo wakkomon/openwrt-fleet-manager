@@ -14,5 +14,12 @@ services:
       OWF_ADMIN_PASSWORD: ${OWF_ADMIN_PASSWORD:-}
       OPENWRT_FLEET_DB: /data/openwrtfleet.db
       OPENWRT_FLEET_BACKUPS: /data/backups
+      OPENWRT_FLEET_DATA: /data
+      # SAN des selbstsignierten Zerts (wird bei fehlendem /certs auto-erzeugt).
+      TLS_SAN: ${TLS_SAN:-IP:192.168.82.24,DNS:dev,DNS:openwrtfleet}
     volumes:
       - ./data:/data
+      # Optional: eigenes Zert einhaengen (cert.pem/key.pem) – dann KEINE
+      # Auto-Erzeugung. Ohne diesen Mount legt entrypoint.py selbstsigniert
+      # nach ./data/tls (persistent).
+      # - ./certs:/certs:ro

@@ -40,6 +40,10 @@ OWF_ADMIN_PASSWORD='geheimes-passwort' docker compose up -d --build
 ```
 
 - Port **8789** (Host → Container), Volume `./data:/data` für DB und Backups.
+- **HTTPS (selbstsigniert):** `entrypoint.py` legt beim Start automatisch ein
+  selbstsigniertes Zert unter `./data/tls` an, falls kein `/certs`-Mount existiert –
+  kein manuelles Zert nötig. Ein eigenes Zert über einen `/certs`-Mount
+  (cert.pem/key.pem) wird bevorzugt und überschreibt die Auto-Erzeugung nicht.
 - **Erster Start:** Der Standard-Admin wird genau einmal angelegt.
   - Mit `OWF_ADMIN_PASSWORD` im Environment/`.env`: dieses Passwort gilt.
   - Ohne: wird ein Zufallspasswort generiert und per
@@ -84,6 +88,7 @@ einfach mitschleppen.
 | `OPENWRT_FLEET_DB` | `/data/openwrtfleet.db` | Pfad der SQLite-DB |
 | `OPENWRT_FLEET_BACKUPS` | `/data/backups` | Verzeichnis fuer Backups |
 || `OPENWRT_FLEET_DATA` | `/data` | Basis-Verzeichnis (Session-Secret u. a.) |
+| `TLS_SAN` | `IP:127.0.0.1,DNS:localhost,DNS:openwrtfleet` | SAN des selbstsignierten HTTPS-Zerts (nur bei fehlendem `/certs`) |
 
 ## Features
 
